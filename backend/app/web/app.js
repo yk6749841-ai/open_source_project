@@ -14,6 +14,9 @@ let view = load('view', 'tiles') === 'table' ? 'table' : 'tiles';   // tiles | t
 let finishing = false;
 let filter = 'all', senderFilter = '', query = '';
 let formIndex = 0, cardIndex = 0;
+// הטופס הפתוח במסך הטופס נשאר פתוח עד שעוברים ממנו — גם אם יצא מהסינון (למשל "לבדיקה"
+// אחרי שאושר השדה הכתום האחרון), כדי שאפשר יהיה ללחוץ "אישור הטופס"
+let pinnedId = null;
 let zoomOpen = false;           // תקריב השדה ליד הטופס — נפתח רק בלחיצה על ריבוע שדה
 let lastSignature = '';
 let celebrated = false;
@@ -214,6 +217,7 @@ function begin(info){
   lastSignature = '';
   celebrated = false;
   formIndex = 0;
+  pinnedId = null;
   cardIndex = 0;
   processing = true;
   if (info.rejected)
@@ -429,6 +433,7 @@ function revealTile(tile){
 function visibleRecords(){
   if (!last) return [];
   return last.records.filter(function(r){
+    if (view === 'form' && r.record_id === pinnedId) return true;
     if (filter === 'review' && !(r.review_count > 0)) return false;
     if (filter === 'approved' && !isApproved(r)) return false;
     if (senderFilter && senderOf(r) !== senderFilter) return false;
@@ -519,6 +524,7 @@ let queryTimer = null;
     queryTimer = setTimeout(function(){
       query = e.target.value.trim().toLowerCase();
       formIndex = 0;
+      pinnedId = null;
       if (last) render(last, true);
     }, 180);
   });
@@ -556,10 +562,11 @@ $$('.filters button').forEach(function(b){
     filter = b.dataset.filter;
     $$('.filters button').forEach(function(x){ x.classList.toggle('on', x === b); });
     formIndex = 0;
+    pinnedId = null;
     if (last) render(last, true);
   };
 });
-$('#senderFilter').onchange = function(e){ senderFilter = e.target.value; formIndex = 0; if (last) render(last, true); };
+$('#senderFilter').onchange = function(e){ senderFilter = e.target.value; formIndex = 0; pinnedId = null; if (last) render(last, true); };
 
 /* ------------------------------------------------------------ מצב טבלה */
 let focusedCell = null;
@@ -1124,6 +1131,7 @@ function currentRecord(){
   const list = visibleRecords();
   if (!list.length) return null;
   formIndex = Math.max(0, Math.min(formIndex, list.length - 1));
+  if (view === 'form') pinnedId = list[formIndex].record_id;
   return list[formIndex];
 }
 
@@ -1143,6 +1151,7 @@ function renderForm(){
     $('#fvApprove').disabled = true;
     $('#formBadge').innerHTML = '';
     $('#fvFailed').classList.add('hidden');
+    $('#fvJoined').classList.add('hidden');
     zoomOpen = false;
     renderZoom();
     return;
@@ -1181,6 +1190,7 @@ function renderForm(){
   }).join('');
 
   renderFailbar(r);
+  renderJoinbar(r);
   $('#fvApprove').disabled = !!r.review_count || r.verified;
   $('#fvApprove').textContent = r.verified ? '✓ הטופס אושר' : '✓ אישור הטופס';
   $('#fvApprove').title = r.review_count ? 'נשארו ' + r.review_count + ' שדות לבדיקה' : '';
@@ -1206,6 +1216,127 @@ function renderFailbar(r){
   const open = $('#rrOpen');
   if (open) open.onclick = function(){ askReread(r.record_id, open); };
 }
+
+/* טופס חתוך שהגיע בשני קבצים. הכול בלי קריאה ובחינם:
+   טופס מחובר → "הפרד"; חלק שהופרד → "חבר בחזרה"; חלק של טופס חתוך → "חבר עם חלק אחר" (בחירה ידנית). */
+const PATIENT_KEYS = ['first_name', 'last_name', 'national_id', 'central_numbers'];
+
+function hasPatient(r){ return PATIENT_KEYS.some(function(k){ return r.fields[k].values.length > 0; }); }
+function joinCandidates(r){
+  return (last ? last.records : []).filter(function(x){ return x.can_join && x.record_id !== r.record_id; });
+}
+
+function renderJoinbar(r){
+  const bar = $('#fvJoined');
+  const canPick = r.can_join && joinCandidates(r).length > 0;
+  let text = '', buttons = '';
+  if (r.joined) {
+    text = '<b>⧉ שני קבצים חוברו לטופס אחד.</b> ' + esc(r.straightened || '');
+    if (!r.verified) buttons = '<button class="secondary" data-join="split">הפרד לשני טפסים</button>';
+  } else if (r.split_from_joined && !r.verified) {
+    text = '<b>⧉ הטופס הזה הופרד מטופס מחובר.</b> אם ההפרדה הייתה בטעות — אפשר לחבר בחזרה, בלי עלות.';
+    buttons = '<button class="secondary" data-join="rejoin">⧉ חבר בחזרה</button>' +
+      (canPick ? '<button class="secondary" data-join="pick">חבר עם חלק אחר</button>' : '');
+  } else if (canPick) {
+    text = '<b>ייתכן שזה רק חלק מטופס.</b> אם החלק השני הועלה בקובץ נפרד — אפשר לחבר ביניהם, בלי עלות.';
+    buttons = '<button class="secondary" data-join="pick">⧉ חבר עם חלק אחר</button>';
+  }
+  if (!text) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  bar.classList.remove('hidden');
+  bar.innerHTML = '<span class="why">' + text + '</span>' + buttons;
+  bar.querySelectorAll('button[data-join]').forEach(function(btn){
+    btn.onclick = function(){
+      const act = btn.dataset.join;
+      if (act === 'pick') return openJoinPick(r, btn);
+      joinAction('/api/records/' + r.record_id + '/' + act, null, btn,
+        act === 'split' ? '✓ הטופס הופרד לשני טפסים — אפשר לחבר בחזרה' : '✓ הטופס חובר בחזרה');
+    };
+  });
+}
+
+async function joinAction(url, body, btn, done){
+  if (btn) btn.disabled = true;
+  const res = await fetch(url, body
+    ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    : { method: 'POST' });
+  const d = await res.json().catch(function(){ return {}; });
+  if (!res.ok) { if (btn) btn.disabled = false; toast(d.detail || 'הפעולה לא הצליחה'); return false; }
+  // נשארים על הטופס שנוצר (או על החלק העליון אחרי הפרדה)
+  last = d;
+  const at = visibleRecords().findIndex(function(x){ return x.record_id === d.focus; });
+  if (at >= 0) formIndex = at;
+  lastSignature = '';
+  render(d, true);
+  toast(done);
+  return true;
+}
+
+// חלון הבחירה: החלקים האחרים כתמונות ממוזערות; חצים + Enter בוחרים, Esc סוגר
+let jpFor = null, jpOther = null, jpOpener = null;
+
+function openJoinPick(r, opener){
+  jpFor = r; jpOther = null; jpOpener = opener;
+  $('#jpList').innerHTML = joinCandidates(r).map(function(x){
+    const who = [x.fields.first_name.values[0], x.fields.last_name.values[0]].filter(Boolean).join(' ') ||
+      (x.fields.commitment_numbers.values[0] ? 'התחייבות ' + x.fields.commitment_numbers.values[0] : '');
+    return '<button class="jpitem" role="option" aria-selected="false" data-rec="' + x.record_id + '">' +
+      '<img alt="" src="' + pageUrl(x) + '/thumb"><span><b>טופס ' + (last.records.indexOf(x) + 1) + '</b>' +
+      '<bdi>' + esc(x.source_name) + '</bdi>' + (who ? '<small><bdi>' + esc(who) + '</bdi></small>' : '') + '</span></button>';
+  }).join('');
+  $$('#jpList .jpitem').forEach(function(b){ b.onclick = function(){ pickPart(b); }; });
+  $('#jpAbove').disabled = $('#jpBelow').disabled = true;
+  $('#joinPick').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  const first = $('#jpList .jpitem');
+  if (first) first.focus();
+}
+
+function pickPart(item){
+  $$('#jpList .jpitem').forEach(function(b){ b.setAttribute('aria-selected', b === item ? 'true' : 'false'); });
+  jpOther = (last.records || []).find(function(x){ return x.record_id === item.dataset.rec; }) || null;
+  $('#jpAbove').disabled = $('#jpBelow').disabled = !jpOther;
+  if (!jpOther) return;
+  // ברירת המחדל: החלק עם פרטי המטופל למעלה
+  const thisOnTop = hasPatient(jpFor) || !hasPatient(jpOther);
+  $('#jpAbove').className = thisOnTop ? 'primary' : 'secondary';
+  $('#jpBelow').className = thisOnTop ? 'secondary' : 'primary';
+  (thisOnTop ? $('#jpAbove') : $('#jpBelow')).focus();
+}
+
+function closeJoinPick(){
+  $('#joinPick').classList.add('hidden');
+  document.body.style.overflow = '';
+  jpFor = jpOther = null;
+  if (jpOpener && document.body.contains(jpOpener)) jpOpener.focus();
+}
+
+async function joinPicked(thisOnTop){
+  if (!jpFor || !jpOther) return;
+  const top = thisOnTop ? jpFor.record_id : jpOther.record_id;
+  const ok = await joinAction('/api/records/' + jpFor.record_id + '/join',
+    { other: jpOther.record_id, top: top }, thisOnTop ? $('#jpAbove') : $('#jpBelow'), '✓ שני החלקים חוברו לטופס אחד');
+  $('#jpAbove').disabled = $('#jpBelow').disabled = false;
+  if (ok) { jpOpener = null; closeJoinPick(); }
+}
+
+function joinPickKeys(e){
+  if (e.key === 'Escape') { e.preventDefault(); return closeJoinPick(); }
+  const items = $$('#jpList .jpitem');
+  const at = items.indexOf(document.activeElement);
+  if (at !== -1 && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].indexOf(e.key) !== -1) {
+    e.preventDefault();
+    // RTL: חץ שמאלה = הבא
+    const step = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? 1 : -1;
+    items[(at + step + items.length) % items.length].focus();
+  } else if (at !== -1 && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault();
+    pickPart(items[at]);
+  }
+}
+$('#jpCancel').onclick = closeJoinPick;
+$('#jpAbove').onclick = function(){ joinPicked(true); };
+$('#jpBelow').onclick = function(){ joinPicked(false); };
+$('#joinPick').addEventListener('click', function(e){ if (e.target.id === 'joinPick') closeJoinPick(); });
 
 function askReread(recordId, opener){
   rrFor = recordId;
@@ -1470,9 +1601,12 @@ function goForm(delta){
   const list = visibleRecords();
   const next = formIndex + delta;
   if (!delta || next < 0 || next >= list.length) return;
-  formIndex = next;
+  // הטופס היעד נבחר לפי הרשימה של עכשיו; הטופס שעוזבים עשוי לצאת מהסינון — אז מחשבים מחדש את מקומו
+  const target = list[next];
+  pinnedId = target.record_id;
+  formIndex = Math.max(0, visibleRecords().indexOf(target));
   zoomOpen = false;
-  cardIndex = firstOpenCard(list[formIndex]);
+  cardIndex = firstOpenCard(target);
   renderForm();
   focusCard(cardIndex, true);
   $('#formView').scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' });
@@ -1518,6 +1652,7 @@ function openRecord(recordId){
   $('#backToTiles').textContent = formFrom === 'table' ? '→ חזרה לטבלה' : '→ כל הטפסים';
   view = 'form';
   zoomOpen = false;
+  pinnedId = recordId;
   const list = visibleRecords();
   formIndex = Math.max(0, list.findIndex(function(r){ return r.record_id === recordId; }));
   cardIndex = list[formIndex] ? firstOpenCard(list[formIndex]) : 0;
@@ -1622,11 +1757,27 @@ function splitValues(text){
 }
 
 /* ------------------------------------------------------------ פעולות מול השרת */
+// הגרסה שהמסך ראה: אם הטופס השתנה בינתיים (חלון אחר), השרת מסרב במקום לדרוס
+function versionOf(recordId){
+  const r = last && last.records.find(function(x){ return x.record_id === recordId; });
+  return r ? r.version : undefined;
+}
+async function refuseStale(res, fallback){
+  const d = await res.json().catch(function(){ return {}; });
+  toast(d.detail || fallback || 'הפעולה לא נשמרה — נסו שוב');
+  // רק כשהטופס השתנה בחלון אחר — מביאים את המצב העדכני
+  if (res.status === 409 && /השתנה/.test(d.detail || '') && batch) {
+    const fresh = await fetch('/api/batches/' + batch);
+    if (fresh.ok) { lastSignature = ''; render(await fresh.json(), true); }
+  }
+}
+
 async function patch(recordId, body){
   const res = await fetch('/api/records/' + recordId, {
-    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ version: versionOf(recordId) }, body))
   });
-  if (!res.ok) { toast('הפעולה לא נשמרה — נסו שוב'); return null; }
+  if (!res.ok) { await refuseStale(res); return null; }
   return res.json();
 }
 
@@ -1662,7 +1813,8 @@ function advanceCard(){
 
 async function undo(recordId, key){
   const res = await fetch('/api/records/' + recordId + '/undo', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ field: key })
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ field: key, version: versionOf(recordId) })
   });
   if (!res.ok) return toast('אין מה לבטל');
   lastSignature = '';
@@ -1671,9 +1823,12 @@ async function undo(recordId, key){
 }
 
 async function verify(recordId){
-  const res = await fetch('/api/records/' + recordId + '/verify', { method: 'POST' });
-  const d = await res.json().catch(function(){ return {}; });
-  if (!res.ok) return toast(d.detail || 'עוד לא אפשר לאשר את הטופס');
+  const res = await fetch('/api/records/' + recordId + '/verify', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version: versionOf(recordId) })
+  });
+  if (!res.ok) return refuseStale(res, 'עוד לא אפשר לאשר את הטופס');
+  const d = await res.json();
   lastSignature = '';
   render(d, true);
   toast('✓ הטופס אושר ונשמר כמאומת');
@@ -1686,6 +1841,8 @@ document.addEventListener('keydown', function(e){
   if (!$('#xlPreview').classList.contains('hidden')) return previewKeys(e);
   if (pz.open) return pageZoomKeys(e);
   if (!$('#rrConfirm').classList.contains('hidden')) return rereadKeys(e);
+  if (!$('#joinPick').classList.contains('hidden')) return joinPickKeys(e);
+  if (!$('#delConfirm').classList.contains('hidden')) return deleteKeys(e);
   if (!$('#newConfirm').classList.contains('hidden')) return newConfirmKeys(e);
   if (e.key === 'Escape') { closePop(); if (!$('#tour').classList.contains('hidden')) closeTour(); }
   if (view !== 'form' || $('#results').classList.contains('hidden') || !$('#tour').classList.contains('hidden')) return;
@@ -1854,6 +2011,319 @@ function resetToUpload(){
   view = load('view', 'tiles') === 'table' ? 'table' : 'tiles';
   window.scrollTo({ top: 0, behavior: calm ? 'auto' : 'smooth' });
 }
+
+/* ------------------------------------------------------------ רשומות במערכת
+   הטפסים שאושרו ב"אישור הטופס", שורה לכל מספר התחייבות — כמו האקסל. המסך מבקש תמיד טווח
+   של תאריכי אישור — ברירת המחדל היום, לפי השעון של המחשב — ולכן אף פעם לא נטען כל המאגר. */
+const REC = { range: 'today', from: '', to: '', rfrom: '', rto: '', q: '', sender: '' };
+const REC_RANGES = { today: 'היום', yesterday: 'אתמול', week: 'ב-7 הימים האחרונים', month: 'החודש' };
+let recTimer = null, recLoaded = false, delFor = null, delOpener = null;
+
+function isoDay(d){
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function dayOf(iso){ const p = iso.split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+function heDay(iso){ const p = iso.split('-'); return p[2] + '/' + p[1] + '/' + p[0]; }
+function shift(days){ const d = new Date(); d.setDate(d.getDate() + days); return isoDay(d); }
+
+// הטווח שנבחר, כימים מקומיים → רגעים מדויקים ב-UTC (השרת שומר UTC). "עד" כולל את כל היום.
+function recDays(){
+  const today = isoDay(new Date());
+  if (REC.range === 'yesterday') return [shift(-1), shift(-1)];
+  if (REC.range === 'week') return [shift(-6), today];
+  if (REC.range === 'month') return [today.slice(0, 8) + '01', today];
+  if (REC.range === 'custom') {
+    let from = REC.from || today, to = REC.to || from;
+    if (to < from) { const t = from; from = to; to = t; }
+    return [from, to];
+  }
+  return [today, today];
+}
+function recQuery(extra){
+  const days = recDays(), end = dayOf(days[1]);
+  end.setDate(end.getDate() + 1);
+  const p = new URLSearchParams({ start: dayOf(days[0]).toISOString(), end: end.toISOString() });
+  if (REC.q) p.set('q', REC.q);
+  if (REC.sender) p.set('sender', REC.sender);
+  if (REC.rfrom) p.set('received_from', REC.rfrom);
+  if (REC.rto) p.set('received_to', REC.rto);
+  Object.keys(extra || {}).forEach(function(k){ p.set(k, extra[k]); });
+  return p.toString();
+}
+function recWhen(){
+  if (REC.range !== 'custom') return REC_RANGES[REC.range];
+  const days = recDays();
+  return days[0] === days[1] ? 'ב-' + heDay(days[0]) : 'בין ' + heDay(days[0]) + ' ל-' + heDay(days[1]);
+}
+
+function showRecordsPage(){
+  closePop();
+  $('#uploadStrip').classList.add('hidden');
+  $('#results').classList.add('hidden');
+  $('#recordsPage').classList.remove('hidden');
+  setNav('#navRecords');
+  $('#pageTitle').textContent = 'רשומות במערכת';
+  $('#pageSub').textContent = 'הטפסים שאושרו נשמרים כאן — שורה לכל מספר התחייבות, כמו בקובץ לאקסל.';
+  const crumb = $('#crumbs li[aria-current]');
+  if (crumb) crumb.textContent = 'רשומות במערכת';
+  loadRecords();
+}
+
+function showIntake(){
+  if ($('#recordsPage').classList.contains('hidden')) return false;
+  $('#recordsPage').classList.add('hidden');
+  $('#uploadStrip').classList.remove('hidden');
+  if (last) $('#results').classList.remove('hidden');
+  setNav('#navUpload');
+  $('#pageTitle').textContent = 'קליטת טפסי התחייבות';
+  $('#pageSub').textContent = 'מעלים טפסים, בודקים, מייצאים לאקסל.';
+  const crumb = $('#crumbs li[aria-current]');
+  if (crumb) crumb.textContent = 'קליטת טפסי התחייבות';
+  return true;
+}
+
+function setNav(sel){
+  ['#navUpload', '#navReview', '#navExport', '#navRecords'].forEach(function(s){
+    $(s).classList.toggle('on', s === sel);
+    if (s === sel) $(s).setAttribute('aria-current', 'page'); else $(s).removeAttribute('aria-current');
+  });
+}
+
+async function loadRecords(){
+  const asked = recQuery();
+  if (!recLoaded) $('#recBody').innerHTML = skeletonRows();
+  $('#recWrap').classList.add('loading');
+  const res = await fetch('/api/saved?' + asked).catch(function(){ return null; });
+  if (asked !== recQuery()) return;  // בינתיים הסינון השתנה — תשובה ישנה לא דורסת חדשה
+  $('#recWrap').classList.remove('loading');
+  const d = res ? await res.json().catch(function(){ return {}; }) : {};
+  if (!res || !res.ok) return toast(d.detail || 'לא הצלחנו לטעון את הטפסים המאושרים');
+  recLoaded = true;
+  renderRecords(d);
+}
+
+function skeletonRows(){
+  const row = '<tr class="skel">' + new Array(10).join('<td><span></span></td>') + '<td></td></tr>';
+  return new Array(5).join(row);
+}
+
+function renderRecords(d){
+  const sel = $('#recSender');
+  const senders = (d.senders || []).slice();
+  if (REC.sender && senders.indexOf(REC.sender) === -1) senders.unshift(REC.sender);
+  const options = '<option value="">כל הגורמים</option>' + senders.map(function(s){
+    return '<option' + (s === REC.sender ? ' selected' : '') + '>' + esc(s) + '</option>';
+  }).join('');
+  if (sel.dataset.options !== options) { sel.innerHTML = options; sel.dataset.options = options; }
+
+  const rows = d.rows || [];
+  $('#recSummary').innerHTML = '<b>' + (d.forms || 0) + '</b> טפסים<span class="sep">·</span><b>' +
+    (d.total_rows || 0) + '</b> שורות<span class="sep">·</span>אושרו ' + esc(recWhen()) +
+    (d.truncated ? '<span class="sep">·</span>מוצגות ' + rows.length + ' הראשונות — הייצוא כולל הכול' : '');
+  $('#recExcel').disabled = $('#recExportMore').disabled = !rows.length;
+  $('#recEmptyTitle').textContent = REC.q || REC.sender || REC.rfrom || REC.rto
+    ? 'אין טפסים מאושרים שמתאימים לסינון' : 'אין טפסים מאושרים ' + recWhen();
+  $('#recEmpty').classList.toggle('hidden', rows.length > 0);
+  renderChips();
+
+  let previous = '';
+  $('#recBody').innerHTML = rows.map(function(row){
+    const first = row.form_key !== previous;
+    previous = row.form_key;
+    const cls = [first ? 'grp' : 'cont', row.can_open ? '' : 'old'].filter(Boolean).join(' ');
+    const rep = function(v, extra){ return '<td class="rep' + (extra ? ' ' + extra : '') + '"><bdi>' + esc(v || '—') + '</bdi></td>'; };
+    const dupes = row.duplicates || [];
+    const dup = dupes.length ? '<span class="badge dup" title="' + esc(dupTitle(dupes)) + '">⧉ ייתכן כפול</span>' : '';
+    const old = row.can_open ? '' : '<span class="oldtag" title="אושר לפני שנוספה השמירה המלאה — לצפייה ולייצוא בלבד">לצפייה</span>';
+    return '<tr class="' + cls + '" tabindex="0" data-key="' + esc(row.form_key) + '" data-open="' + (row.can_open ? 1 : 0) + '"' +
+      ' aria-label="' + (row.can_open ? 'פתיחת הטופס לבדיקה' : 'טופס ישן — לצפייה בלבד') + '">' +
+      rep(row.first_name) + rep(row.last_name) + rep(row.national_id, 'num') + rep(row.central_numbers, 'num') +
+      rep(row.sample_received_date) + rep(row.sending_entity) +
+      '<td class="num"><bdi>' + esc(row.commitment_number || '—') + '</bdi>' + dup + '</td>' +
+      '<td class="src" title="' + esc(row.source_name) + '"><bdi>' + esc(row.source_name) + '</bdi> · עמ׳ ' + row.page_number + old + '</td>' +
+      '<td class="when">' + esc(localTime(row.approved_at)) + '</td>' +
+      '<td class="acts">' + (first ? '<button class="delbtn" data-del="' + esc(row.form_key) +
+        '" aria-label="מחיקת הטופס" title="מחיקת הטופס">🗑</button>' : '') + '</td></tr>';
+  }).join('');
+}
+
+// שבבים לסינונים הפעילים — כל אחד נסגר לבד, ו"נקה הכול" מחזיר להיום
+function renderChips(){
+  const chips = [];
+  if (REC.q) chips.push(['q', 'חיפוש', REC.q]);
+  if (REC.sender) chips.push(['sender', 'גורם שולח', REC.sender]);
+  if (REC.rfrom || REC.rto) chips.push(['received', 'קבלת הדגימה',
+    (REC.rfrom ? 'מ-' + heDay(REC.rfrom) : '') + (REC.rfrom && REC.rto ? ' ' : '') + (REC.rto ? 'עד ' + heDay(REC.rto) : '')]);
+  const box = $('#recChips');
+  box.classList.toggle('hidden', !chips.length);
+  box.innerHTML = chips.map(function(c){
+    return '<button class="recchip" data-chip="' + c[0] + '" aria-label="הסרת הסינון ' + esc(c[1]) + '">' +
+      c[1] + ': <b><bdi>' + esc(c[2]) + '</bdi></b><i aria-hidden="true">✕</i></button>';
+  }).join('') + (chips.length ? '<button class="recclear" id="recClear">נקה הכול</button>' : '');
+}
+
+function localTime(iso){
+  const d = new Date(iso);
+  if (isNaN(d)) return iso || '';
+  return heDay(isoDay(d)) + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+function dupTitle(dupes){
+  return 'אותו מספר התחייבות קיים בטופס מאושר אחר: ' + dupes.map(function(x){
+    return x.source_name + ', אושר ' + localTime(x.approved_at);
+  }).join(' · ');
+}
+
+// פתיחת טופס מאושר במסך הבדיקה — גם אחרי הפעלה מחדש של השרת, בלי קריאה חוזרת
+async function openSaved(key){
+  const res = await fetch('/api/saved/' + encodeURIComponent(key) + '/open', { method: 'POST' });
+  const d = await res.json().catch(function(){ return {}; });
+  if (!res.ok) return toast(d.detail || 'לא הצלחנו לפתוח את הטופס');
+  showIntake();
+  clearInterval(timer);
+  clearNotices();
+  batch = d.batch_id;
+  processing = false;
+  finishing = false;
+  celebrated = true;  // טפסים שכבר אושרו — בלי חגיגה ובלי חלונית ייצוא שנפתחת לבד
+  drop.classList.add('hidden');
+  $('#progress').classList.add('hidden');
+  last = d;
+  lastSignature = '';
+  render(d, true);
+  openRecord(d.focus);
+}
+
+$('#navRecords').onclick = showRecordsPage;
+// מהרשומות חזרה לקליטה: הלשונית "קליטת טפסים" רק חוזרת למסך, לא פותחת קליטה חדשה
+$('#navUpload').addEventListener('click', function(e){ if (showIntake()) e.stopImmediatePropagation(); }, true);
+['#navReview', '#navExport'].forEach(function(sel){ $(sel).addEventListener('click', showIntake, true); });
+
+$('#recBody').addEventListener('click', function(e){
+  const del = e.target.closest('button[data-del]');
+  if (del) return askDelete(del.dataset.del, del);
+  const tr = e.target.closest('tr[data-key]');
+  if (!tr) return;
+  if (tr.dataset.open === '1') openSaved(tr.dataset.key);
+  else toast('הטופס הזה אושר לפני שנוספה השמירה המלאה — אפשר לראות ולייצא אותו, לא לפתוח');
+});
+$('#recBody').addEventListener('keydown', function(e){
+  if (e.key !== 'Enter' || e.target.tagName !== 'TR') return;
+  e.preventDefault();
+  e.target.click();
+});
+
+// בחירת טווח: פקד מקטעים עם חצים (כמו קבוצת כפתורי רדיו)
+const rangeButtons = $$('#recRange button');
+function pickRange(button, focus){
+  REC.range = button.dataset.range;
+  rangeButtons.forEach(function(b){
+    const on = b === button;
+    b.setAttribute('aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  if (focus) button.focus();
+  $('#recCustom').classList.toggle('hidden', REC.range !== 'custom');
+  if (REC.range === 'custom' && !$('#recFrom').value) $('#recFrom').value = REC.from = isoDay(new Date());
+  loadRecords();
+}
+rangeButtons.forEach(function(b){ b.onclick = function(){ pickRange(b); }; });
+$('#recRange').addEventListener('keydown', function(e){
+  const at = rangeButtons.indexOf(document.activeElement);
+  if (at === -1) return;
+  const step = e.key === 'ArrowLeft' ? 1 : e.key === 'ArrowRight' ? -1 : 0;  // RTL: שמאלה = הבא
+  if (!step) return;
+  e.preventDefault();
+  pickRange(rangeButtons[(at + step + rangeButtons.length) % rangeButtons.length], true);
+});
+
+$('#recMore').onclick = function(){
+  const open = $('#recAdvanced').classList.toggle('hidden') === false;
+  $('#recMore').setAttribute('aria-expanded', String(open));
+  if (open) $('#recRFrom').focus();
+};
+
+function recChanged(){ clearTimeout(recTimer); recTimer = setTimeout(loadRecords, 250); }
+$('#recQ').addEventListener('input', function(e){ REC.q = e.target.value.trim(); recChanged(); });
+$('#recSender').onchange = function(e){ REC.sender = e.target.value; loadRecords(); };
+[['#recFrom', 'from'], ['#recTo', 'to'], ['#recRFrom', 'rfrom'], ['#recRTo', 'rto']].forEach(function(pair){
+  $(pair[0]).addEventListener('change', function(e){ REC[pair[1]] = e.target.value; loadRecords(); });
+});
+
+$('#recChips').addEventListener('click', function(e){
+  const chip = e.target.closest('button');
+  if (!chip) return;
+  const which = chip.id === 'recClear' ? 'all' : chip.dataset.chip;
+  if (which === 'q' || which === 'all') { REC.q = ''; $('#recQ').value = ''; }
+  if (which === 'sender' || which === 'all') { REC.sender = ''; $('#recSender').value = ''; }
+  if (which === 'received' || which === 'all') { REC.rfrom = REC.rto = ''; $('#recRFrom').value = $('#recRTo').value = ''; }
+  if (which === 'all') pickRange(rangeButtons[0]); else loadRecords();
+  $('#recQ').focus();
+});
+
+// ייצוא: Excel בכפתור הראשי, CSV/JSON בתפריט. הדפדפן מוריד ישירות; offset — שעון מקומי בקובץ
+function exportSaved(format){
+  window.location.href = '/api/saved/export?' + recQuery({ format: format, offset: new Date().getTimezoneOffset() });
+}
+function closeExportMenu(){
+  $('#recExportMenu').classList.add('hidden');
+  $('#recExportMore').setAttribute('aria-expanded', 'false');
+}
+$('#recExcel').onclick = function(){ exportSaved('xlsx'); };
+$('#recExportMore').onclick = function(e){
+  e.stopPropagation();
+  const open = $('#recExportMenu').classList.toggle('hidden') === false;
+  $('#recExportMore').setAttribute('aria-expanded', String(open));
+  if (open) $('#recExportMenu button').focus();
+};
+$$('#recExportMenu button').forEach(function(b){
+  b.onclick = function(){ closeExportMenu(); exportSaved(b.dataset.export); };
+});
+$('#recExportMenu').addEventListener('keydown', function(e){
+  const items = $$('#recExportMenu button'), at = items.indexOf(document.activeElement);
+  if (e.key === 'Escape') { e.preventDefault(); closeExportMenu(); $('#recExportMore').focus(); }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    items[(at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+  }
+});
+document.addEventListener('click', function(e){ if (!e.target.closest('.recexport')) closeExportMenu(); });
+
+function askDelete(key, opener){
+  delFor = key;
+  delOpener = opener;
+  $('#delConfirm').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  $('#delCancel').focus();  // ברירת המחדל: לא למחוק
+}
+function closeDelete(){
+  $('#delConfirm').classList.add('hidden');
+  document.body.style.overflow = '';
+  delFor = null;
+  if (delOpener && document.body.contains(delOpener)) delOpener.focus();
+}
+function deleteKeys(e){
+  if (e.key === 'Escape') { e.preventDefault(); return closeDelete(); }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    (document.activeElement === $('#delCancel') ? $('#delYes') : $('#delCancel')).focus();
+  }
+}
+$('#delCancel').onclick = closeDelete;
+$('#delConfirm').addEventListener('click', function(e){ if (e.target.id === 'delConfirm') closeDelete(); });
+$('#delYes').onclick = async function(){
+  const key = delFor;
+  if (!key) return;
+  $('#delYes').disabled = true;
+  const res = await fetch('/api/saved/' + encodeURIComponent(key), { method: 'DELETE' });
+  $('#delYes').disabled = false;
+  const d = await res.json().catch(function(){ return {}; });
+  delOpener = null;
+  closeDelete();
+  if (!res.ok) return toast(d.detail || 'המחיקה לא הצליחה');
+  if (d.batch && d.batch.batch_id === batch) { last = d.batch; lastSignature = ''; }
+  toast('🗑 הטופס נמחק');
+  loadRecords();
+};
 
 /* ------------------------------------------------------------ רגע הצלחה */
 function unverifiedCount(d){

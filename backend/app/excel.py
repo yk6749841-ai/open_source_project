@@ -156,3 +156,74 @@ def workbook_bytes(batch: Batch) -> bytes:
     buffer = BytesIO()
     build_workbook(batch).save(buffer)
     return buffer.getvalue()
+
+
+# ------------------------------------------------------------ ייצוא "רשומות במערכת"
+#
+# רק טפסים מאושרים, באותה צורה כמו הקובץ הרגיל: שורה לכל מספר התחייבות. השורות
+# מגיעות מוכנות ממסד הנתונים (db.rows_for_export).
+
+SAVED_KEYS = ("first_name", "last_name", "national_id", "central_numbers",
+              "sample_received_date", "sending_entity", "commitment_number")
+SAVED_HEADERS = [f.label_he for f in FIELDS] + ["קובץ מקור", "עמוד בקובץ", "אושר"]
+
+
+def saved_cells(row: dict) -> list[str]:
+    return [str(row.get(k) or "") for k in SAVED_KEYS] + [
+        str(row.get("source_name") or ""), str(row.get("page_number") or ""), str(row.get("approved_local") or ""),
+    ]
+
+
+def saved_workbook_bytes(rows: list[dict], title: str) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "טפסים מאושרים"
+    ws.sheet_view.rightToLeft = True
+    thin = Side(style="thin", color=LINE)
+
+    widths = [14, 16, 16, 18, 20, 22, 20, 30, 12, 18]
+    for index, (label, width) in enumerate(zip(SAVED_HEADERS, widths), start=1):
+        cell = ws.cell(row=1, column=index, value=label)
+        cell.fill = PatternFill("solid", fgColor=NAVY)
+        cell.font = Font(bold=True, color="FFFFFF", size=11)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(index)].width = width
+    ws.row_dimensions[1].height = 30
+    ws.freeze_panes = "A2"
+
+    for row_index, row in enumerate(rows, start=2):
+        for column_index, value in enumerate(saved_cells(row), start=1):
+            cell = ws.cell(row=row_index, column=column_index, value=neutralize(value))
+            cell.number_format = "@"  # טקסט: אפסים מובילים ותאריכים נשמרים כפי שהם
+            cell.alignment = Alignment(horizontal="right", vertical="top", wrap_text=True)
+            cell.border = Border(bottom=thin)
+
+    note = ws.cell(row=len(rows) + 3, column=1, value=title)
+    note.font = Font(size=10, color="5A6B7B", italic=True)
+    note.alignment = Alignment(horizontal="right")
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def saved_csv_bytes(rows: list[dict]) -> bytes:
+    """UTF-8 with BOM, so Excel opens the Hebrew correctly. Every value neutralised."""
+    import csv
+    import io
+
+    text = io.StringIO()
+    writer = csv.writer(text)
+    writer.writerow(SAVED_HEADERS)
+    for row in rows:
+        writer.writerow([neutralize(v) for v in saved_cells(row)])
+    return ("﻿" + text.getvalue()).encode("utf-8")
+
+
+def saved_json(rows: list[dict]) -> list[dict]:
+    """The same rows, as objects with English keys."""
+    return [
+        {**{k: row.get(k) or "" for k in SAVED_KEYS},
+         "source_name": row.get("source_name") or "", "page_number": row.get("page_number"),
+         "approved_at": row.get("approved_local") or ""}
+        for row in rows
+    ]

@@ -26,6 +26,7 @@ from PIL import Image
 from app.config import BATCHES_DIR, SETTINGS, WORK_DIR
 from app.consensus import NAME_KEYS, combine, merge_names
 from app.crops import crop_field
+from app.halves import join_halves
 from app.locate import check_regions, snap_to_ink
 from app.models import (
     PAGE_DONE,
@@ -139,6 +140,12 @@ def _process(batch_id: str) -> None:
             batch.status = "failed" if not batch.records else "partial"
             batch.error = reader.retired
             return
+
+    # טופס שצולם בשני חצאים → טופס אחד. מקומי ובחינם; תקלה כאן לא מפילה את הקריאה.
+    try:
+        join_halves(batch)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
 
     _finish(batch, len(pages))
 

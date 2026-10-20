@@ -90,6 +90,7 @@ class SourceFile:
     page_count: int = 0
     error: str = ""  # קובץ פסול — נרשם כאן ואינו מפיל את השאר
     sha256: str = ""  # טביעת אצבע: אותו קובץ פעמיים לא נשלח שוב למודלים
+    joined: bool = False  # לא הועלה — תמונה שהמערכת הדביקה משני חצאים של טופס
 
     @property
     def accepted(self) -> bool:
@@ -117,6 +118,7 @@ class FormRecord:
     verified: bool = False  # המזכירה בדקה ושמרה כמאומת
     upside_down: bool = False  # המודל אמר שהדף הגיע הפוך; סובב לתצוגה בלבד
     straightened: str = ""  # מה יושר מקומית לפני הקריאה, למשל "סובב ב-90°"
+    version: int = 0  # עולה בכל שינוי של אדם — עריכה ממסך ישן נדחית ולא דורסת
 
     @property
     def review_count(self) -> int:
@@ -152,6 +154,10 @@ class Batch:
     seconds: float = 0.0
     # לכל דף, לפי הסדר: {source_index, page_number, status, record_id}
     pages: list[dict] = field(default_factory=list)
+    # טופס שחובר אוטומטית משני חצאים → שתי הרשומות המקוריות, לכפתור "הפרד"
+    joined: dict[str, list[FormRecord]] = field(default_factory=dict)
+    # אחרי "הפרד": לכל אחד משני החלקים → {top, bottom, source_index}, לכפתור "חבר בחזרה"
+    split_pairs: dict[str, dict] = field(default_factory=dict)
 
     @property
     def review_total(self) -> int:
@@ -164,7 +170,8 @@ class Batch:
 
     @property
     def accepted_sources(self) -> list[SourceFile]:
-        return [s for s in self.sources if s.accepted]
+        """The files that were uploaded and accepted (not an image joined from two halves)."""
+        return [s for s in self.sources if s.accepted and not s.joined]
 
     @property
     def rejected_sources(self) -> list[SourceFile]:

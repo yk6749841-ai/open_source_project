@@ -43,6 +43,7 @@
       <button class="pill on" id="navUpload" aria-current="page">קליטת טפסים</button>
       <button class="pill" id="navReview" disabled>טפסים לבדיקה <b id="navReviewN"></b></button>
       <button class="pill" id="navExport" disabled>ייצוא לאקסל</button>
+      <button class="pill" id="navRecords" title="הטפסים שאושרו — מוצגים אלה שאושרו היום">רשומות במערכת</button>
     </nav>
   </div>
 </header>
@@ -58,7 +59,7 @@
 
   <div class="pagehead">
     <h1 id="pageTitle">קליטת טפסי התחייבות</h1>
-    <p>מעלים טפסים, בודקים, מייצאים לאקסל.</p>
+    <p id="pageSub">מעלים טפסים, בודקים, מייצאים לאקסל.</p>
   </div>
 
   <div id="notices"></div>
@@ -201,6 +202,8 @@
       </div>
       <!-- טופס שהקריאה שלו נכשלה: הסיבה, וכפתור "קרא שוב" שקודם שואל -->
       <div class="failbar hidden" id="fvFailed" role="status" aria-live="polite"></div>
+      <!-- טופס שחובר אוטומטית משני חצאים: מה חובר, וכפתור "הפרד" (בחינם) -->
+      <div class="failbar joinbar hidden" id="fvJoined" role="status" aria-live="polite"></div>
       <div class="viewer">
         <div class="frame" id="fvFrame"></div>
         <!-- תקריב קבוע ליד הטופס: נפתח בלחיצה על ריבוע שדה -->
@@ -214,6 +217,82 @@
           <button class="secondary" id="fvExport" disabled>⬇ ייצוא לאקסל</button>
           <button class="primary" id="fvApprove">✓ אישור הטופס</button>
         </span>
+      </div>
+    </div>
+  </section>
+
+  <!-- אזור: רשומות במערכת — הטפסים שאושרו, שורה לכל מספר התחייבות (כמו האקסל).
+       נטען רק טווח תאריכי האישור שנבחר — ברירת מחדל: היום. אף פעם לא כל המאגר. -->
+  <section id="recordsPage" class="strip hidden" aria-labelledby="recTitle">
+    <h2 class="sr-only" id="recTitle">רשומות במערכת</h2>
+
+    <div class="card recpanel" role="search" aria-label="סינון הטפסים המאושרים">
+      <div class="recbar">
+        <div class="recsearch">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4.5 4.5"/></svg>
+          <input id="recQ" type="search" placeholder="חיפוש לפי שם, ת״ז או מספר" autocomplete="off" aria-label="חיפוש לפי שם, תעודת זהות או מספר">
+        </div>
+        <label class="recfield">
+          <span>גורם שולח</span>
+          <select id="recSender"><option value="">כל הגורמים</option></select>
+        </label>
+        <div class="recfield">
+          <span id="recRangeLabel">תאריך אישור</span>
+          <div class="recseg" id="recRange" role="radiogroup" aria-labelledby="recRangeLabel">
+            <button role="radio" aria-checked="true" tabindex="0" data-range="today">היום</button>
+            <button role="radio" aria-checked="false" tabindex="-1" data-range="yesterday">אתמול</button>
+            <button role="radio" aria-checked="false" tabindex="-1" data-range="week">7 ימים</button>
+            <button role="radio" aria-checked="false" tabindex="-1" data-range="month">החודש</button>
+            <button role="radio" aria-checked="false" tabindex="-1" data-range="custom">טווח…</button>
+          </div>
+        </div>
+        <button class="recmore" id="recMore" aria-expanded="false" aria-controls="recAdvanced">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M6 10h8M8.5 15h3"/></svg>
+          סינון מתקדם
+        </button>
+      </div>
+
+      <div class="recrow hidden" id="recCustom">
+        <span class="rowlabel">אושר בין</span>
+        <label class="recdate"><span>מתאריך</span><input type="date" id="recFrom"></label>
+        <label class="recdate"><span>עד תאריך</span><input type="date" id="recTo"></label>
+      </div>
+      <div class="recrow hidden" id="recAdvanced">
+        <span class="rowlabel">תאריך קבלת הדגימה</span>
+        <label class="recdate"><span>מתאריך</span><input type="date" id="recRFrom"></label>
+        <label class="recdate"><span>עד תאריך</span><input type="date" id="recRTo"></label>
+      </div>
+      <div class="recchips hidden" id="recChips" aria-live="polite"></div>
+    </div>
+
+    <div class="rechead">
+      <p class="recsummary" id="recSummary" aria-live="polite"></p>
+      <span class="grow"></span>
+      <div class="recexport">
+        <button class="primary" id="recExcel">⬇ ייצוא ל-Excel</button>
+        <button class="secondary recexportmore" id="recExportMore" aria-haspopup="menu" aria-expanded="false"
+                aria-controls="recExportMenu" aria-label="פורמטים נוספים לייצוא">▾</button>
+        <div class="recmenu hidden" id="recExportMenu" role="menu">
+          <button role="menuitem" data-export="csv">CSV — טקסט מופרד בפסיקים</button>
+          <button role="menuitem" data-export="json">JSON — למערכות אחרות</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card rectablewrap" id="recWrap">
+      <table class="rectable">
+        <thead><tr>
+          <th scope="col">שם פרטי</th><th scope="col">שם משפחה</th><th scope="col">ת״ז</th>
+          <th scope="col">מספר מרכזי</th><th scope="col">תאריך קבלה</th><th scope="col">גורם שולח</th>
+          <th scope="col">מספר התחייבות</th><th scope="col">מקור</th><th scope="col">אושר</th>
+          <th scope="col"><span class="sr-only">פעולות</span></th>
+        </tr></thead>
+        <tbody id="recBody"></tbody>
+      </table>
+      <div class="recempty hidden" id="recEmpty">
+        <svg viewBox="0 0 48 48" aria-hidden="true"><rect x="10" y="6" width="28" height="36" rx="4"/><path d="M17 17h14M17 24h14M17 31h8"/></svg>
+        <b id="recEmptyTitle">אין טפסים מאושרים היום</b>
+        <span>טופס נכנס לכאן אחרי "אישור הטופס". אפשר לבחור טווח אחר או לנקות את הסינון.</span>
       </div>
     </div>
   </section>
@@ -270,6 +349,42 @@
       <button class="secondary" id="xlCancel">ביטול</button>
       <button class="primary" id="xlDownload">⬇ הורדת הקובץ</button>
       <button class="primary hidden" id="xlNew">⬆ קליטה חדשה</button>
+    </div>
+  </div>
+</div>
+
+<!-- מחיקת רשומה: לא הפיך, ולכן שואלים קודם. ברירת המחדל: ביטול -->
+<div id="delConfirm" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="delTitle" aria-describedby="delText">
+  <div class="modalbox rrbox">
+    <div class="modalhead">
+      <div>
+        <h2 id="delTitle">למחוק את הטופס המאושר?</h2>
+        <p class="sub" id="delText">כל השורות של הטופס, תמונת הטופס והתקריבים שלו יימחקו לצמיתות. אי אפשר לבטל.</p>
+      </div>
+    </div>
+    <div class="modalfoot">
+      <span class="grow"></span>
+      <button class="secondary" id="delCancel">ביטול</button>
+      <button class="primary danger" id="delYes">🗑 כן, מחק</button>
+    </div>
+  </div>
+</div>
+
+<!-- חיבור ידני של שני חלקים של טופס חתוך: בוחרים את החלק השני, ואז מי למעלה. בלי עלות. -->
+<div id="joinPick" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="jpTitle" aria-describedby="jpText">
+  <div class="modalbox jpbox">
+    <div class="modalhead">
+      <div>
+        <h2 id="jpTitle">לחבר עם איזה חלק?</h2>
+        <p class="sub" id="jpText">בוחרים את החלק השני של אותו טופס. מוצגים רק חלקים של טפסים חתוכים מההעלאה הזו. החיבור לא עולה כסף, ואפשר להפריד אחר כך.</p>
+      </div>
+    </div>
+    <div class="jplist" id="jpList" role="listbox" aria-label="חלקים לחיבור"></div>
+    <div class="modalfoot">
+      <span class="grow"></span>
+      <button class="secondary" id="jpCancel">ביטול</button>
+      <button class="secondary" id="jpBelow" disabled>⧉ חבר — הטופס הזה למטה</button>
+      <button class="secondary" id="jpAbove" disabled>⧉ חבר — הטופס הזה למעלה</button>
     </div>
   </div>
 </div>

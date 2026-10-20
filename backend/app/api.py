@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
 import traceback
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -12,11 +15,11 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from app import db, gold, pipeline, store
+from app import db, gold, halves, pipeline, store
 from app.config import PROJECT_ROOT, SETTINGS
 from app.crops import crop_field, padded
 from app.pages import ink_enhanced
-from app.excel import preview as excel_preview, workbook_bytes
+from app.excel import preview as excel_preview, saved_csv_bytes, saved_json, saved_workbook_bytes, workbook_bytes
 from app.fields import FIELDS, FIELDS_BY_KEY
 from app.files import ACCEPTED_LABEL, sniff_kind
 from app.models import (
@@ -223,8 +226,54 @@ def reread_record(record_id: str) -> dict:
     return _serialise(batch)
 
 
+@app.post("/api/records/{record_id}/split")
+def split_record(record_id: str) -> dict:
+    """Undo an automatic join of two halves: both original forms come back. Free."""
+    batch = _finished_batch_of(record_id)
+    top = (batch.joined.get(record_id) or [None])[0]
+    try:
+        halves.split_joined(batch, record_id)
+    except halves.SplitRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**_serialise(batch), "focus": top.record_id if top else ""}
+
+
+@app.post("/api/records/{record_id}/rejoin")
+def rejoin_record(record_id: str) -> dict:
+    """Join back two halves that were split. Free — the joined picture already exists."""
+    batch = _finished_batch_of(record_id)
+    try:
+        joined = halves.rejoin(batch, record_id)
+    except halves.SplitRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**_serialise(batch), "focus": joined.record_id}
+
+
+@app.post("/api/records/{record_id}/join")
+def join_record(record_id: str, payload: dict) -> dict:
+    """A person joins two parts of a cut form, and says which goes on top. Free."""
+    batch = _finished_batch_of(record_id)
+    try:
+        joined = halves.join_by_hand(
+            batch, record_id, str(payload.get("other", "")), str(payload.get("top", ""))
+        )
+    except halves.SplitRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**_serialise(batch), "focus": joined.record_id}
+
+
+def _finished_batch_of(record_id: str) -> Batch:
+    found = store.find_record(record_id)
+    if found is None:
+        raise HTTPException(404, "הרשומה לא נמצאה.")
+    batch, _ = found
+    if batch.status in ("queued", "processing"):
+        raise HTTPException(409, "הקריאה עוד לא הסתיימה.")
+    return batch
+
+
 @app.post("/api/records/{record_id}/verify")
-def verify_record(record_id: str) -> dict:
+def verify_record(record_id: str, payload: dict | None = None) -> dict:
     """The secretary checked every field of this form against the original.
 
     Every field becomes green, and the form is saved as an answer-key entry for
@@ -235,6 +284,7 @@ def verify_record(record_id: str) -> dict:
     if found is None:
         raise HTTPException(404, "הרשומה לא נמצאה.")
     batch, record = found
+    _check_version(record, payload)
     still_open = [FIELDS_BY_KEY[k].label_he for k, f in record.fields.items() if f.state == STATE_REVIEW]
     if still_open:
         raise HTTPException(409, "יש שדות שעוד צריך לבדוק: " + ", ".join(still_open))
@@ -252,7 +302,155 @@ def verify_record(record_id: str) -> dict:
             db.save_approved(record, source, page)  # נשמר לתמיד במסד הנתונים (work/forms.db)
         except Exception:  # noqa: BLE001 - האישור במסך לא נופל בגלל שמירה
             traceback.print_exc()
+    _changed(batch, record)
     return _serialise(batch)
+
+
+def _check_version(record, payload: dict | None) -> None:
+    """Optimistic check: an edit made on an older copy of the form is refused,
+    so two open screens never silently overwrite each other."""
+    sent = (payload or {}).get("version")
+    if sent is not None and int(sent) != record.version:
+        raise HTTPException(409, "הטופס השתנה בינתיים (אולי בחלון אחר). המסך רוענן — נסו שוב.")
+
+
+def _changed(batch: Batch, record) -> None:
+    record.version += 1
+
+
+# ------------------------------------------------------------ "רשומות במערכת"
+# רק טפסים שאושרו, שורה לכל מספר התחייבות. המסך שולח תמיד טווח של תאריכי אישור
+# (ברירת מחדל: היום, לפי השעון של הדפדפן) — לא טוענים את כל המאגר.
+
+def _filters(start: str, end: str, q: str, sender: str, received_from: str, received_to: str) -> dict:
+    if not start or not end:
+        raise HTTPException(400, "חסר טווח תאריכים.")
+    return {"start": start, "end": end, "q": q, "sender": sender,
+            "received_from": received_from, "received_to": received_to}
+
+
+@app.get("/api/saved")
+def saved_rows(
+    start: str = "", end: str = "", q: str = "", sender: str = "",
+    received_from: str = "", received_to: str = "", limit: int = db.LIST_LIMIT,
+) -> dict:
+    """The approved rows of the chosen days, filtered."""
+    filters = _filters(start, end, q, sender, received_from, received_to)
+    try:
+        return db.list_rows(**filters, limit=max(0, min(limit, db.LIST_LIMIT)))
+    except ValueError as exc:
+        raise HTTPException(400, "תאריך לא תקין.") from exc
+
+
+@app.get("/api/saved/export")
+def export_saved_rows(
+    format: str = "xlsx", start: str = "", end: str = "", q: str = "", sender: str = "",
+    received_from: str = "", received_to: str = "", offset: int = 0,
+) -> Response:
+    """Everything filtered on screen, as Excel, CSV or JSON. `offset` is the
+    browser's minutes from UTC, so approval times read as local time."""
+    filters = _filters(start, end, q, sender, received_from, received_to)
+    try:
+        rows = db.rows_for_export(**filters)
+    except ValueError as exc:
+        raise HTTPException(400, "תאריך לא תקין.") from exc
+    for row in rows:
+        row["approved_local"] = _local_time(row["approved_at"], offset)
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M")
+    if format == "json":
+        body = json.dumps(saved_json(rows), ensure_ascii=False, indent=1).encode("utf-8")
+        media, suffix = "application/json", "json"
+    elif format == "csv":
+        body, media, suffix = saved_csv_bytes(rows), "text/csv; charset=utf-8", "csv"
+    else:
+        forms = len({r["form_key"] for r in rows})
+        title = f"{forms} טפסים מאושרים · {len(rows)} שורות · ייצוא {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+        body = saved_workbook_bytes(rows, title)
+        media, suffix = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"
+    filename = f"approved-{stamp}.{suffix}"
+    return Response(content=body, media_type=media, headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        "Cache-Control": "no-store",
+    })
+
+
+def _local_time(stamp: str, offset: int) -> str:
+    """UTC time → the browser's local time, DD/MM/YYYY HH:MM."""
+    try:
+        moment = datetime.fromisoformat(stamp) - timedelta(minutes=offset)
+        return moment.strftime("%d/%m/%Y %H:%M")
+    except (TypeError, ValueError):
+        return stamp or ""
+
+
+@app.post("/api/saved/{form_key}/open")
+def open_saved_form(form_key: str) -> dict:
+    """Open an approved form in the review screen — also after the server restarted.
+    The approved forms of its upload come back with it (so "next form" works). No reading."""
+    saved = db.form_of(form_key)
+    if saved is None:
+        raise HTTPException(404, "הטופס לא נמצא.")
+    if not saved.get("record"):
+        raise HTTPException(409, "הטופס הזה אושר לפני שנוספה השמירה המלאה — אפשר לראות ולייצא אותו, לא לפתוח.")
+    record_id = saved["record_id"]
+    found = store.find_record(record_id)
+    if found is not None:
+        return {**_serialise(found[0]), "focus": record_id}
+    if store.get(saved["batch_id"]) is not None:
+        raise HTTPException(409, "הטופס כבר לא נמצא בהעלאה הפתוחה.")
+    loaded = db.load_batch(saved["batch_id"])
+    if loaded is None:
+        raise HTTPException(404, "הטופס לא נמצא.")
+    batch, images = loaded
+    for record in batch.records:
+        page = pipeline.page_image_path(batch.batch_id, record.source_index, record.page_number)
+        kept = images.get(record.record_id)
+        if not page.is_file() and kept and kept.is_file():
+            page.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(kept, page)
+    store.put(batch)
+    return {**_serialise(batch), "focus": record_id}
+
+
+@app.delete("/api/saved/{form_key}")
+def delete_saved_form(form_key: str) -> dict:
+    """Delete one approved form for good: its rows, its approved copy and page image,
+    and — when its upload is still here — the page and every close-up cut from it."""
+    gone = db.delete_form(form_key)
+    if gone is None:
+        raise HTTPException(404, "הטופס לא נמצא.")
+    found = store.find_record(gone["record_id"]) if gone.get("record_id") else None
+    if found is not None:
+        batch, record = found
+        parts = [record, *batch.joined.pop(record.record_id, [])]  # טופס מחובר: גם שני החלקים
+        batch.records = [r for r in batch.records if r.record_id != record.record_id]
+        batch.pages = [p for p in batch.pages if p.get("record_id") != record.record_id]
+        for part in parts:
+            _remove_page_files(batch, part)
+        return {"deleted": True, "batch": _serialise(batch)}
+    if gone.get("source"):
+        source = json.loads(gone["source"])
+        folder = store.BATCHES_DIR / str(gone["batch_id"]) / "sources" / str(source["index"])
+        if folder.is_dir():
+            for path in (folder / "pages").glob(f"page-{gone['page_number']:03d}*"):
+                path.unlink(missing_ok=True)
+            for path in (folder / "crops").glob(f"{gone['page_number']:03d}-*"):
+                path.unlink(missing_ok=True)
+    return {"deleted": True, "batch": None}
+
+
+def _remove_page_files(batch: Batch, record) -> None:
+    """The page image and everything cut from it; the uploaded file too, once no
+    other form of the batch still comes from it."""
+    folder = store.source_dir(batch.batch_id, record.source_index)
+    for path in (folder / "pages").glob(f"page-{record.page_number:03d}*"):
+        path.unlink(missing_ok=True)
+    for path in (folder / "crops").glob(f"{record.page_number:03d}-*"):
+        path.unlink(missing_ok=True)
+    others = [r for r in batch.records if r.source_index == record.source_index]
+    others += [p for pair in batch.joined.values() for p in pair if p.source_index == record.source_index]
+    if not others:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 @app.get("/api/approved")
@@ -267,6 +465,7 @@ def update_record(record_id: str, payload: dict) -> dict:
     if found is None:
         raise HTTPException(404, "הרשומה לא נמצאה.")
     batch, record = found
+    _check_version(record, payload)
 
     key = payload.get("field")
     if key not in record.fields:
@@ -289,6 +488,7 @@ def update_record(record_id: str, payload: dict) -> dict:
         field.state = STATE_APPROVED
         field.settle()
 
+    _changed(batch, record)
     return _serialise(batch)
 
 
@@ -299,12 +499,14 @@ def undo_field(record_id: str, payload: dict) -> dict:
     if found is None:
         raise HTTPException(404, "הרשומה לא נמצאה.")
     batch, record = found
+    _check_version(record, payload)
     field = record.fields.get(payload.get("field"))
     if field is None:
         raise HTTPException(400, "שדה לא מוכר.")
     if not field.undo():
         raise HTTPException(409, "אין מה לבטל בשדה הזה.")
     record.verified = False
+    _changed(batch, record)
     return _serialise(batch)
 
 
@@ -395,6 +597,7 @@ def _serialise(batch: Batch) -> dict:
                 "error": s.error,
             }
             for s in batch.sources
+            if not s.joined  # התמונה המחוברת אינה קובץ שהועלה
         ],
         "records": [
             {
@@ -412,6 +615,10 @@ def _serialise(batch: Batch) -> dict:
                 "seconds": r.seconds,
                 "verified": r.verified,
                 "straightened": r.straightened,
+                "joined": r.record_id in batch.joined,  # חובר משני חצאים — אפשר להפריד
+                "split_from_joined": r.record_id in batch.split_pairs,  # אפשר "חבר בחזרה"
+                "can_join": halves.is_partial(batch, r),  # חלק של טופס חתוך — אפשר לחבר ידנית
+                "version": r.version,
                 "full_name_crop": full_name_region(r) is not None,
                 "fields": {
                     key: {
