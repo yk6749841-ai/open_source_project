@@ -50,6 +50,8 @@ REASON_TEXT = {
     "names_read_twice_same": "השם נקרא פעמיים (גם מתקריב) — אותה קריאה, עדיין לוודא",
     "names_two_readings": "שתי קריאות שונות של השם (הדף והתקריב) — לבחור",
     "joined_halves": "הטופס חובר משני קבצים — לוודא שהערך שייך לטופס",
+    "unknown_char": "בערך יש תו שלא נקרא (?) — יש לתקן לפני אישור",
+    "split_page": "העמוד פוצל — לוודא שהערך שייך לטופס הזה",
     "joined_conflict": "שני חלקי הטופס נתנו ערכים שונים — לבחור",
 }
 
@@ -71,6 +73,8 @@ def validate_record(
             field.flag("multiple_values")
 
         for value in field.values:
+            if "?" in value:
+                field.flag("unknown_char")  # תו שלא נקרא — אי אפשר לאשר עד שמתקנים
             if spec.kind == "digits":
                 _check_digits(field, value, key)
             elif spec.kind == "date":

@@ -109,9 +109,51 @@ def test_a_part_with_a_patient_is_not_a_half():
     assert halves.join_halves(batch) == 0
 
 
-def test_pdf_pages_are_never_joined():
-    batch = _batch(("bottom.pdf", BOTTOM), ("top.pdf", TOP), kind="pdf")
+def test_pdf_pages_next_to_each_other_are_joined():
+    # עמוד 2 חצי עליון, עמוד 3 חצי תחתון — בין עמודים שלמים (החלטת נועה, 20/10/2026)
+    batch = _batch(("p1.pdf", WHOLE), ("p2.pdf", TOP), ("p3.pdf", BOTTOM), ("p4.pdf", WHOLE), kind="pdf")
+    assert halves.join_halves(batch) == 1
+    assert len(batch.records) == 3
+    joined = next(r for r in batch.records if r.record_id in batch.joined)
+    assert joined.fields["first_name"].values == ["טובה"]
+    assert joined.fields["commitment_numbers"].values == ["7254647"]
+
+
+def test_pdf_halves_far_apart_are_not_joined():
+    far = _batch(("p1.pdf", TOP), ("p2.pdf", WHOLE), ("p3.pdf", WHOLE), ("p4.pdf", BOTTOM), kind="pdf")
+    assert halves.join_halves(far) == 0
+    assert halves.PART_NOTE in far.records[3].straightened  # גלוי, עם חיבור ידני
+
+
+def test_pdf_page_and_image_next_to_each_other_are_joined():
+    batch = _batch(("end-of-file.pdf", TOP), kind="pdf")
+    image = _batch(("bottom.png", BOTTOM))
+    # שני קבצים באותה העלאה: סוף ה-PDF ואחריו התמונה
+    source = image.sources[0]
+    source.index = 2
+    page = source_dir(batch.batch_id, 2) / "pages" / "page-001.png"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (200, 100), "white").save(page)
+    image.records[0].source_index = 2
+    batch.sources.append(source)
+    batch.records.append(image.records[0])
+    assert halves.join_halves(batch) == 1
+
+
+def test_a_page_without_any_data_is_offered_not_joined():
+    batch = _batch(("p1.pdf", WHOLE), ("p2.pdf", {}), kind="pdf")
     assert halves.join_halves(batch) == 0
+    empty = batch.records[1]
+    assert halves.EMPTY_NOTE in empty.straightened
+    assert halves.is_partial(batch, empty)  # כפתור "חבר עם חלק אחר" זמין
+
+
+def test_join_by_hand_works_for_pdf_pages():
+    batch = _batch(("p1.pdf", TOP), ("p2.pdf", WHOLE), ("p3.pdf", BOTTOM), kind="pdf")
+    halves.join_halves(batch)
+    top, bottom = batch.records[0], batch.records[2]
+    form = halves.join_by_hand(batch, bottom.record_id, top.record_id, top.record_id)
+    assert form.fields["commitment_numbers"].values == ["7254647"]
 
 
 def test_two_possible_tops_far_apart_are_left_alone():
@@ -214,11 +256,7 @@ def test_whole_form_cannot_be_joined_by_hand():
         halves.join_by_hand(batch, part.record_id, whole.record_id, whole.record_id)
 
 
-def test_pdf_or_approved_part_cannot_be_joined_by_hand():
-    pdf = _batch(("b.pdf", BOTTOM), ("t.pdf", TOP), kind="pdf")
-    with pytest.raises(halves.SplitRefused):
-        halves.join_by_hand(pdf, pdf.records[0].record_id, pdf.records[1].record_id, pdf.records[1].record_id)
-
+def test_approved_part_cannot_be_joined_by_hand():
     batch = _batch(("bottom.png", {**BOTTOM, "sending_entity": ["X"]}), ("top.png", TOP))
     batch.records[1].verified = True
     with pytest.raises(halves.SplitRefused):

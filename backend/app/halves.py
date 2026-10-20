@@ -10,6 +10,10 @@ stacked into one page and the fields are combined — no new reading, no cost.
 A pixel test ("is the edge cut?") was measured first (20/10/2026) and rejected:
 on the sample PDFs, many whole pages also have ink touching the edge.
 
+PDF pages join too (Noa, 20/10/2026), with one more safeguard: a PDF page only
+joins a page right next to it in upload order (page 3 with page 4, or the last page
+of one file with the first of the next) — a PDF often holds many forms.
+
 The joined form stays orange until a person checks it, and "split" brings the
 two original records back.
 """
@@ -22,7 +26,7 @@ import io
 
 from PIL import Image
 
-from app.files import KIND_JPEG, KIND_PNG
+from app.files import KIND_JPEG, KIND_PDF, KIND_PNG
 from app.models import Batch, ExtractedField, FormRecord, Region, SourceFile
 from app.store import source_dir
 from app.validators import validate_record
@@ -34,6 +38,7 @@ TAIL = ("commitment_numbers", "sample_received_date")
 SINGLE = ("first_name", "last_name", "national_id", "sending_entity")
 
 PART_NOTE = "לא נמצאו בטופס פרטי מטופל — ייתכן שזה רק חלק מהטופס"
+EMPTY_NOTE = "עמוד בלי נתונים — ייתכן שהוא המשך של הטופס הקודם (אפשר לחבר ידנית)"
 
 
 class SplitRefused(Exception):
@@ -47,6 +52,10 @@ def join_halves(batch: Batch) -> int:
         if bottom not in batch.records:
             continue
         tops = [t for t in batch.records if t is not bottom and _fits(batch, t, bottom)]
+        if _is_pdf(batch, bottom):
+            tops = [t for t in tops if _next_to(batch, t, bottom)]  # עמוד PDF — רק עם השכן הצמוד
+        else:
+            tops = [t for t in tops if not _is_pdf(batch, t) or _next_to(batch, t, bottom)]
         if len(tops) > 1:
             # כמה מועמדים: רק השכן הצמוד בסדר ההעלאה, ורק אם הוא יחיד
             at = batch.records.index(bottom)
@@ -56,6 +65,10 @@ def join_halves(batch: Batch) -> int:
             continue
         _join(batch, tops[0], bottom)
         joined += 1
+    for record in batch.records:
+        # עמוד שאין בו שום ערך — לא מחברים לבד (יכול להיות דף כריכה), רק מציעים
+        if _usable(batch, record) and all(f.is_empty for f in record.fields.values()):
+            _add_note(record, EMPTY_NOTE)
     return joined
 
 
@@ -97,8 +110,8 @@ def rejoin(batch: Batch, record_id: str) -> FormRecord:
 
 
 def is_partial(batch: Batch, record: FormRecord) -> bool:
-    """Only part of a form: from a picture, and missing the patient or the
-    commitment side entirely. Only these can be joined by hand."""
+    """Only part of a form: an uploaded page (image or PDF) missing the patient or
+    the commitment side entirely. Only these can be joined by hand."""
     return _usable(batch, record) and (
         all(record.fields[k].is_empty for k in IDENTITY)
         or all(record.fields[k].is_empty for k in TAIL)
@@ -111,7 +124,7 @@ def join_by_hand(batch: Batch, record_id: str, other_id: str, top_id: str) -> Fo
     if first is None or other is None or first is other:
         raise SplitRefused("צריך לבחור שני חלקים שונים מאותה העלאה.")
     if not (is_partial(batch, first) and is_partial(batch, other)):
-        raise SplitRefused("אפשר לחבר רק חלקים של טופס חתוך (תמונות, לא טופס שלם או PDF).")
+        raise SplitRefused("אפשר לחבר רק חלקים של טופס חתוך, לא טופס שלם.")
     if top_id not in (first.record_id, other.record_id):
         raise SplitRefused("לא נבחר איזה חלק למעלה.")
     top, bottom = (first, other) if top_id == first.record_id else (other, first)
@@ -124,13 +137,33 @@ def _find(batch: Batch, record_id: str) -> FormRecord | None:
 
 # ------------------------------------------------------------ מי חצי ומי מתאים
 
-def _is_image(batch: Batch, record: FormRecord) -> bool:
-    source = next((s for s in batch.sources if s.index == record.source_index), None)
-    return bool(source and not source.joined and source.kind in (KIND_JPEG, KIND_PNG))
+def _source(batch: Batch, record: FormRecord) -> SourceFile | None:
+    return next((s for s in batch.sources if s.index == record.source_index), None)
+
+
+def _joinable(batch: Batch, record: FormRecord) -> bool:
+    """A page that was uploaded (not a picture this module made): an image or a PDF page."""
+    source = _source(batch, record)
+    return bool(source and not source.joined and source.kind in (KIND_JPEG, KIND_PNG, KIND_PDF))
+
+
+def _is_pdf(batch: Batch, record: FormRecord) -> bool:
+    source = _source(batch, record)
+    return bool(source and source.kind == KIND_PDF)
+
+
+def _part(batch: Batch, record: FormRecord) -> str:
+    """How to name one part in the note: the file, and the page when it is a PDF page."""
+    return f"{record.source_name} עמ׳ {record.page_number}" if _is_pdf(batch, record) else record.source_name
+
+
+def _next_to(batch: Batch, one: FormRecord, other: FormRecord) -> bool:
+    """Right next to each other in upload order (also across the end of one file)."""
+    return abs(batch.records.index(one) - batch.records.index(other)) == 1
 
 
 def _usable(batch: Batch, record: FormRecord) -> bool:
-    return _is_image(batch, record) and not record.error and not record.verified \
+    return _joinable(batch, record) and not record.error and not record.verified \
         and record.record_id not in batch.joined
 
 
@@ -186,7 +219,7 @@ def _join(
     record.seconds = round(top.seconds + bottom.seconds, 1)
     record.template = top.template or bottom.template
     record.model_note = " · ".join(filter(None, [top.model_note, bottom.model_note]))
-    note = f"{how} משני קבצים: {top.source_name} (למעלה) + {bottom.source_name} (למטה) — לבדוק"
+    note = f"{how} משני חלקים: {_part(batch, top)} (למעלה) + {_part(batch, bottom)} (למטה) — לבדוק"
     earlier = [n for r in (top, bottom) for n in r.straightened.split(" · ") if n and n != PART_NOTE]
     record.straightened = " · ".join([note, *earlier])
     validate_record(record)
@@ -277,7 +310,7 @@ def _stack(
 
     source = SourceFile(
         index=index,
-        filename=f"{top.source_name} + {bottom.source_name}",
+        filename=f"{_part(batch, top)} + {_part(batch, bottom)}",
         kind=KIND_PNG,
         page_count=1,
         sha256=hashlib.sha256(buffer.getvalue()).hexdigest(),

@@ -28,6 +28,11 @@ def get(batch_id: str) -> Batch | None:
         return _BATCHES.get(batch_id)
 
 
+def all_batches() -> list[Batch]:
+    with _LOCK:
+        return list(_BATCHES.values())
+
+
 def find_record(record_id: str) -> tuple[Batch, FormRecord] | None:
     with _LOCK:
         for batch in _BATCHES.values():

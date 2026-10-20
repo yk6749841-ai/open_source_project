@@ -27,6 +27,7 @@ from app.config import BATCHES_DIR, SETTINGS, WORK_DIR
 from app.consensus import NAME_KEYS, combine, merge_names
 from app.crops import crop_field
 from app.halves import join_halves
+from app.known import apply_known, from_saved, saved_for_page
 from app.locate import check_regions, snap_to_ink
 from app.models import (
     PAGE_DONE,
@@ -146,6 +147,10 @@ def _process(batch_id: str) -> None:
         join_halves(batch)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
+    # טופס שכבר אושר מקובץ אחר (אותו מספר התחייבות ות"ז) — הערכים מהמערכת. אחרי החיבור,
+    # כדי שחצי תחתון לא יקבל שם ות"ז מהמאגר לפני שהתחבר.
+    apply_known(batch.records)
+    # עמוד עם שני טפסים — לא מפצלים לבד: המזכירה מחליטה, בכפתור, בחינם (twoforms.py, החלטת נועה 20/10/2026)
 
     _finish(batch, len(pages))
 
@@ -213,13 +218,25 @@ def _extract_all(reader: Reader, batch: Batch, pages: list[Page]) -> list[FormRe
 
 
 def read_form(
-    reader: Reader, image_path: Path, batch_id: str, source: SourceFile, page_number: int
+    reader: Reader, image_path: Path, batch_id: str, source: SourceFile, page_number: int,
+    use_saved: bool = True,
 ) -> FormRecord:
-    """One page → one record: the reader's answer, then the local rules."""
+    """One page → one record: the reader's answer, then the local rules.
+
+    `use_saved=False` — always the reader, never the values a person approved before.
+    The measurement needs that: it compares the reader against those very values."""
     started = time.perf_counter()
     record = FormRecord.empty(batch_id, source, page_number)
     record.low_resolution = _is_low_resolution(image_path)
     record.straightened = turn_note(image_path)
+
+    # אותו עמוד כבר אושר בעבר: הערכים מהמערכת, בלי מודל ובלי עלות
+    saved = saved_for_page(image_path) if use_saved else None
+    if saved is not None:
+        from_saved(record, saved, same_page=True)
+        record.cost_usd = 0.0
+        record.seconds = round(time.perf_counter() - started, 1)
+        return record
 
     try:
         reading = _read(reader.provider, image_path, source, page_number)
@@ -236,13 +253,42 @@ def read_form(
     record.seconds = round(time.perf_counter() - started, 1)
     usage = reading.usage
     record.cost_usd = usage.cost_usd if usage and usage.cost_usd is not None else 0.0
+    apply_reading(record, reading, image_path)
+    return record
+
+
+def apply_reading(record: FormRecord, reading: RawExtraction, image_path: Path) -> None:
+    """The reader's answer → the record, through every local rule. Shared with the
+    free measurement, so it scores exactly what the secretary would see."""
     combine(record, reading)
     check_regions(record, image_path)  # מיקומי התיבות מול העמוד עצמו — מקומי, בלי עלות
     snap_to_ink(record, image_path)  # תיבות של כתב יד — נצמדות לדיו הכחול שבטופס
     # קריאה שנייה של השם מתקריב — כבויה (18/10/2026, החלטת נועה): עלתה 3–6¢ לטופס ובמדידה
     # על 3 טפסים שיפרה אחד, לא שינתה אחד והחמירה אחד. הפונקציה נשארת: look_again_at_names.
     validate_record(record)
-    return record
+
+
+def saved_readings(image_path: Path, sha256: str = "", page_number: int = 0) -> list[tuple[str, RawExtraction]]:
+    """Every answer already paid for this page, from any version of the instructions:
+    (prompt_version, reading), newest version first when it is the current one. Free."""
+    digest = _page_digest(image_path)
+    found: list[tuple[str, RawExtraction]] = []
+    if not READ_CACHE_DIR.is_dir():
+        return found
+    for path in READ_CACHE_DIR.glob("*.json"):
+        try:
+            key = json.loads(path.read_text(encoding="utf-8")).get("key") or []
+        except (OSError, ValueError):
+            continue
+        by_page = len(key) >= 5 and key[0] == "page" and key[1] == digest
+        by_file = bool(sha256) and len(key) >= 5 and key[0] == sha256 and key[1] == page_number
+        if not (by_page or by_file):
+            continue
+        reading = _load_saved(tuple(key))
+        if reading is not None:
+            found.append((str(key[4]), reading))  # במקום 4 בשני סוגי המפתח: גרסת ההוראות
+    found.sort(key=lambda item: item[0] != PROMPT_VERSION)
+    return found
 
 
 # ------------------------------------------------------------ שלב שני: השם מתוך תקריב חד
@@ -383,6 +429,7 @@ def _reread_run(batch: Batch, index: int, old: FormRecord, page: dict | None) ->
         record = read_form(Reader(provider), image_path, batch.batch_id, source, old.page_number)
         if record.upside_down:
             show_upright(record, image_path)
+        apply_known([record])  # אם הטופס כבר אושר בעבר — הערכים מהמערכת
         record.record_id = old.record_id  # אותו טופס — המסך ממשיך לזהות אותו
     except Exception as exc:  # noqa: BLE001 - חוט רקע לא מת בשקט
         traceback.print_exc()
@@ -584,6 +631,20 @@ def _finish(batch: Batch, total: int) -> None:
 
     batch.status = "partial" if notes else "completed"
     batch.error = ". ".join(notes)
+
+
+def park_batch(batch: Batch) -> int:
+    """Keep the upload's unapproved forms as "waiting for approval" (see db.park). Never fails
+    the caller — a storage problem is logged."""
+    if batch.status in ("queued", "processing"):
+        return 0
+    try:
+        from app import db
+
+        return db.park(batch, lambda r: page_image_path(batch.batch_id, r.source_index, r.page_number))
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return 0
 
 
 def page_image_path(batch_id: str, source_index: int, page_number: int) -> Path:

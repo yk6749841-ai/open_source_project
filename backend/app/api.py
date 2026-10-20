@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from app import db, gold, halves, pipeline, store
+from app import db, gold, halves, pipeline, store, twoforms
 from app.config import PROJECT_ROOT, SETTINGS
 from app.crops import crop_field, padded
 from app.pages import ink_enhanced
@@ -29,6 +29,7 @@ from app.models import (
     Batch,
     SourceFile,
     new_id,
+    now,
 )
 from app.validators import REASON_TEXT
 
@@ -104,6 +105,9 @@ def _start(received: list[tuple[str, bytes]]) -> dict:
         reasons = sorted({s.error for s in batch.sources if s.error})
         raise HTTPException(415, "אף קובץ לא התקבל. " + " ".join(reasons))
 
+    # העלאה חדשה בלי שסיימו את הקודמות: הטפסים שלא אושרו נשמרים כ"ממתינים לאישור"
+    for other in store.all_batches():
+        pipeline.park_batch(other)
     store.put(batch)
     pipeline.start(batch.batch_id)
     return {
@@ -262,6 +266,29 @@ def join_record(record_id: str, payload: dict) -> dict:
     return {**_serialise(batch), "focus": joined.record_id}
 
 
+@app.post("/api/records/{record_id}/split-page")
+def split_page(record_id: str, payload: dict) -> dict:
+    """Two forms on one page — the secretary decided to split it. Free: no reading, the
+    values already read go to the part where they lie."""
+    batch = _finished_batch_of(record_id)
+    try:
+        parts = twoforms.split_page(batch, record_id, str(payload.get("axis", "")), payload.get("cut"))
+    except twoforms.SplitPageRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**_serialise(batch), "focus": parts[0].record_id}
+
+
+@app.post("/api/records/{record_id}/unsplit-page")
+def unsplit_page(record_id: str) -> dict:
+    """Undo a page split: the original page comes back as one form. Free."""
+    batch = _finished_batch_of(record_id)
+    try:
+        original = twoforms.unsplit_page(batch, record_id)
+    except twoforms.SplitPageRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**_serialise(batch), "focus": original.record_id}
+
+
 def _finished_batch_of(record_id: str) -> Batch:
     found = store.find_record(record_id)
     if found is None:
@@ -288,11 +315,16 @@ def verify_record(record_id: str, payload: dict | None = None) -> dict:
     still_open = [FIELDS_BY_KEY[k].label_he for k, f in record.fields.items() if f.state == STATE_REVIEW]
     if still_open:
         raise HTTPException(409, "יש שדות שעוד צריך לבדוק: " + ", ".join(still_open))
+    unknown = [FIELDS_BY_KEY[k].label_he for k, f in record.fields.items() if _has_unknown(f.values)]
+    if unknown:
+        raise HTTPException(409, "יש תו שלא נקרא (?) ב: " + ", ".join(unknown) + " — יש לתקן לפני אישור הטופס.")
 
     for field in record.fields.values():
         field.state = STATE_APPROVED
         field.settle()
     record.verified = True
+    if record.from_store:
+        record.from_store = now()  # "אושר ב-" מציג את האישור האחרון
 
     source = next(s for s in batch.sources if s.index == record.source_index)
     page = pipeline.page_image_path(batch.batch_id, record.source_index, record.page_number)
@@ -300,10 +332,66 @@ def verify_record(record_id: str, payload: dict | None = None) -> dict:
         gold.save(record, source, page)
         try:
             db.save_approved(record, source, page)  # נשמר לתמיד במסד הנתונים (work/forms.db)
+            db.unpark(record.record_id, page)  # אושר — כבר לא ממתין
         except Exception:  # noqa: BLE001 - האישור במסך לא נופל בגלל שמירה
             traceback.print_exc()
     _changed(batch, record)
     return _serialise(batch)
+
+
+# ------------------------------------------------------------ ממתינים לאישור
+# נשמרים רק כשצריך: הדפדפן נסגר (הדף שולח /park), העלאה חדשה (_start), או שהשרת נסגר (shutdown).
+
+@app.post("/api/batches/{batch_id}/park")
+def park_batch(batch_id: str) -> dict:
+    """Keep this upload's unapproved forms as waiting. Called when the page closes."""
+    batch = store.get(batch_id)
+    return {"waiting": pipeline.park_batch(batch) if batch is not None else 0}
+
+
+@app.on_event("shutdown")
+def park_everything() -> None:
+    """The server is closing (the computer shuts down): nothing unapproved is lost."""
+    for batch in store.all_batches():
+        pipeline.park_batch(batch)
+
+
+@app.get("/api/pending")
+def pending_forms(q: str = "", sender: str = "") -> dict:
+    """Every form waiting for approval, oldest first."""
+    return db.list_pending(q=q, sender=sender)
+
+
+@app.get("/api/pending/count")
+def pending_count() -> dict:
+    return {"count": db.pending_count()}
+
+
+@app.post("/api/pending/{record_id}/open")
+def open_pending_form(record_id: str) -> dict:
+    """Open a waiting form in the review screen — also after a restart. No reading."""
+    found = store.find_record(record_id)
+    if found is not None:
+        return {**_serialise(found[0]), "focus": record_id}
+    batch_id = db.pending_batch_of(record_id)
+    if batch_id is None:
+        raise HTTPException(404, "הטופס כבר לא ממתין (ייתכן שאושר).")
+    if store.get(batch_id) is not None:
+        raise HTTPException(409, "הטופס כבר לא נמצא בהעלאה הפתוחה.")
+    batch = db.load_pending_batch(batch_id)
+    if batch is None:
+        raise HTTPException(404, "הטופס לא נמצא.")
+    missing = [r for r in batch.records
+               if not pipeline.page_image_path(batch_id, r.source_index, r.page_number).is_file()]
+    if missing:
+        raise HTTPException(410, "תמונת הטופס לא נמצאה בתיקיית העבודה.")
+    store.put(batch)
+    return {**_serialise(batch), "focus": record_id}
+
+
+def _has_unknown(values: list[str]) -> bool:
+    """A "?" marks a character nobody read. Such a value can't be approved (Noa, 20/10/2026)."""
+    return any("?" in v for v in values)
 
 
 def _check_version(record, payload: dict | None) -> None:
@@ -475,6 +563,9 @@ def update_record(record_id: str, payload: dict) -> dict:
     if "values" in payload:
         field.remember()
         values = [str(v).strip() for v in payload["values"] if str(v).strip()]
+        if values != field.values and record.from_store:
+            # טופס שהגיע מהמערכת ושונה — חייב "אישור הטופס" מחדש (החלטת נועה, 20/10/2026)
+            record.verified = False
         if len(values) != len(field.values):
             field.value_regions = []  # המיקומים לפי ערך כבר לא תואמים
         field.values = values
@@ -483,7 +574,13 @@ def update_record(record_id: str, payload: dict) -> dict:
         field.state = STATE_APPROVED if values else STATE_REVIEW
         if not values:
             field.reasons = ["missing"]
+        elif _has_unknown(values):
+            # עדיין יש "?" — לא נחשב תיקון גמור (החלטת נועה, 20/10/2026)
+            field.state = STATE_REVIEW
+            field.reasons = ["unknown_char"]
     elif payload.get("approve"):
+        if _has_unknown(field.values):
+            raise HTTPException(409, f"ב{FIELDS_BY_KEY[key].label_he} יש תו שלא נקרא (?) — יש לתקן אותו לפני אישור.")
         field.remember()
         field.state = STATE_APPROVED
         field.settle()
@@ -619,6 +716,8 @@ def _serialise(batch: Batch) -> dict:
                 "split_from_joined": r.record_id in batch.split_pairs,  # אפשר "חבר בחזרה"
                 "can_join": halves.is_partial(batch, r),  # חלק של טופס חתוך — אפשר לחבר ידנית
                 "version": r.version,
+                "from_store": r.from_store,  # הערכים מהמערכת (אושר בעבר) — מועד האישור השמור
+                "split_from_page": r.record_id in batch.page_splits,  # חלק מעמוד שפוצל — "בטל פיצול"
                 "full_name_crop": full_name_region(r) is not None,
                 "fields": {
                     key: {

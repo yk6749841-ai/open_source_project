@@ -119,6 +119,8 @@ class FormRecord:
     upside_down: bool = False  # המודל אמר שהדף הגיע הפוך; סובב לתצוגה בלבד
     straightened: str = ""  # מה יושר מקומית לפני הקריאה, למשל "סובב ב-90°"
     version: int = 0  # עולה בכל שינוי של אדם — עריכה ממסך ישן נדחית ולא דורסת
+    # הטופס כבר אושר בעבר: הערכים הגיעו מהמערכת ולא מהקריאה. מועד האישור השמור (UTC), או ריק
+    from_store: str = ""
 
     @property
     def review_count(self) -> int:
@@ -158,6 +160,8 @@ class Batch:
     joined: dict[str, list[FormRecord]] = field(default_factory=dict)
     # אחרי "הפרד": לכל אחד משני החלקים → {top, bottom, source_index}, לכפתור "חבר בחזרה"
     split_pairs: dict[str, dict] = field(default_factory=dict)
+    # עמוד שפוצל לשני טפסים: כל חלק → הרשומה המקורית של העמוד, לכפתור "בטל פיצול"
+    page_splits: dict[str, "FormRecord"] = field(default_factory=dict)
 
     @property
     def review_total(self) -> int:

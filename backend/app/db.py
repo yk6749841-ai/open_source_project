@@ -100,7 +100,14 @@ def save_approved(record: FormRecord, source: SourceFile, page_png: Path,
         conn.execute(f"INSERT INTO approved_forms ({columns}) VALUES ({marks}) "
                      f"ON CONFLICT(form_key) DO UPDATE SET {updates}", row)
     with _LOCK, _rows_conn(path) as conn:
+        # אותו טופס מקובץ אחר (PDF/תמונה) — הגרסה הקודמת נמחקת; נשארת רק האחרונה (החלטת נועה, 20/10/2026)
+        older = [f["form_key"] for f in _same(conn, record.fields["commitment_numbers"].values,
+                                               record.fields["national_id"].values, exclude=key)]
+        images = [kept for old in older for kept in _drop_form(conn, old)]
         _save_rows(conn, key, record, source, image)
+    for old_image in images:
+        if old_image and Path(old_image) != image:
+            Path(old_image).unlink(missing_ok=True)
     return key
 
 
@@ -327,6 +334,76 @@ def _duplicates(conn: sqlite3.Connection, rows: list[dict]) -> dict[int, list[di
     return found
 
 
+# ------------------------------------------------------------ טופס שכבר קיים במערכת
+#
+# "אותו טופס" (החלטת נועה, 20/10/2026): אותו עמוד בדיוק (טביעת אצבע), או מספר התחייבות משותף
+# וגם ת"ז תואמת — זהה, או חסרה באחד מהם. ת"ז שונה = לא אותו טופס (נשאר "ייתכן כפול").
+
+def _id_digits(values: list[str]) -> str:
+    return "".join(ch for v in values for ch in v if ch.isdigit()).lstrip("0")
+
+
+def _split(value: str | None) -> list[str]:
+    return [part.strip() for part in (value or "").split("|") if part.strip()]
+
+
+def _forms(conn: sqlite3.Connection, keys: list[str]) -> list[dict]:
+    """The saved forms with these keys: their values per field, as the secretary approved them."""
+    if not keys:
+        return []
+    marks = ", ".join("?" for _ in keys)
+    rows = conn.execute(f"SELECT * FROM approved_rows WHERE form_key IN ({marks}) ORDER BY form_key, row_index",
+                        keys).fetchall()
+    forms: dict[str, list] = {}
+    for row in rows:
+        forms.setdefault(row["form_key"], []).append(row)
+    found = []
+    for key, group in forms.items():
+        first = group[0]
+        values = {k: _split(first[k]) for k in
+                  ("first_name", "last_name", "national_id", "central_numbers", "sample_received_date", "sending_entity")}
+        values["commitment_numbers"] = [r["commitment_number"] for r in group if (r["commitment_number"] or "").strip()]
+        found.append({"form_key": key, "values": values, "approved_at": first["approved_at"],
+                      "record": first["record"], "source_name": first["source_name"]})
+    return sorted(found, key=lambda f: f["approved_at"] or "", reverse=True)
+
+
+def _same(conn: sqlite3.Connection, commitments: list[str], national_id: list[str],
+          exclude: str | None = None) -> list[dict]:
+    numbers = sorted({n.strip() for n in commitments if n.strip()})
+    if not numbers:
+        return []
+    marks = ", ".join("?" for _ in numbers)
+    keys = [r["form_key"] for r in conn.execute(
+        f"SELECT DISTINCT form_key FROM approved_rows WHERE commitment_number IN ({marks})", numbers)]
+    mine = _id_digits(national_id)
+    return [f for f in _forms(conn, [k for k in keys if k != exclude])
+            if not mine or not _id_digits(f["values"]["national_id"]) or _id_digits(f["values"]["national_id"]) == mine]
+
+
+def saved_form(key: str, path: Path | None = None) -> dict | None:
+    """The approved form saved for exactly this page, when its full record was kept."""
+    with _LOCK, _rows_conn(path) as conn:
+        found = _forms(conn, [key])
+    return found[0] if found and found[0]["record"] else None
+
+
+def same_form(commitments: list[str], national_id: list[str], path: Path | None = None) -> dict | None:
+    """The latest approved form that is this form, from another file — or None."""
+    with _LOCK, _rows_conn(path) as conn:
+        found = _same(conn, commitments, national_id)
+    return found[0] if found else None
+
+
+def _drop_form(conn: sqlite3.Connection, key: str) -> list[str]:
+    """Remove a saved form (its panel rows and its approved row). Returns its image paths."""
+    images = [r["page_image"] for r in conn.execute("SELECT page_image FROM approved_forms WHERE form_key = ?", (key,))]
+    images += [r["page_image"] for r in conn.execute("SELECT DISTINCT page_image FROM approved_rows WHERE form_key = ?", (key,))]
+    conn.execute("DELETE FROM approved_rows WHERE form_key = ?", (key,))
+    conn.execute("DELETE FROM approved_forms WHERE form_key = ?", (key,))
+    return [i for i in images if i]
+
+
 def form_of(key: str, path: Path | None = None) -> dict | None:
     """The saved form behind a panel row: its record (to reopen) and where it came from."""
     with _LOCK, _rows_conn(path) as conn:
@@ -392,3 +469,149 @@ def delete_form(key: str, path: Path | None = None) -> dict | None:
         if image:
             Path(image).unlink(missing_ok=True)
     return dict(row)
+
+
+# ------------------------------------------------------------ ממתינים לאישור
+#
+# טפסים שנקראו ועוד לא אושרו נשמרים **רק כשצריך** (החלטת נועה, 20/10/2026): כשהדפדפן נסגר, כשהשרת
+# נסגר (המחשב נכבה), או כשמתחילים העלאה חדשה בלי לסיים. שורה אחת לכל טופס — אותו עמוד לעולם לא
+# פעמיים — שמתעדכנת במקום בכל שמירה, ונמחקת ברגע שהטופס אושר. לא מתערבב עם המאושרים.
+
+_PENDING_SCHEMA = """
+CREATE TABLE IF NOT EXISTS pending_forms (
+    record_id     TEXT PRIMARY KEY,
+    form_key      TEXT,
+    batch_id      TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    review_count  INTEGER NOT NULL DEFAULT 0,
+    first_name    TEXT, last_name TEXT, national_id TEXT, central_numbers TEXT,
+    sample_received_date TEXT, sending_entity TEXT, commitment_numbers TEXT,
+    source_name   TEXT,
+    page_number   INTEGER,
+    position      INTEGER,
+    search_text   TEXT,
+    record        TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    parked_at     TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS pending_forms_key ON pending_forms (form_key);
+CREATE INDEX IF NOT EXISTS pending_forms_batch ON pending_forms (batch_id);
+"""
+
+
+def _pending_conn(path: Path | None = None) -> sqlite3.Connection:
+    conn = _rows_conn(path)
+    conn.executescript(_PENDING_SCHEMA)
+    return conn
+
+
+def park(batch: Batch, page_of, path: Path | None = None) -> int:
+    """Keep this upload's unapproved forms as "waiting for approval", so nothing is lost
+    when the browser or the computer closes. Approved ones leave the list. Returns how many wait."""
+    stamp = now()
+    waiting = []
+    for position, record in enumerate(list(batch.records)):
+        if record.verified:
+            continue
+        source = next((s for s in batch.sources if s.index == record.source_index), None)
+        page = page_of(record)
+        if source is None or not page.is_file():
+            continue
+        values = {k: MULTI_SEPARATOR.join(record.fields[k].values) for k in TEXT_FIELDS + ("central_numbers",)}
+        text = " ".join(v for f in record.fields.values() for v in f.values) + " " + record.source_name
+        waiting.append({
+            "record_id": record.record_id, "form_key": form_key(page), "batch_id": batch.batch_id,
+            "status": "failed" if record.error else "review" if record.review_count else "ready",
+            "review_count": record.review_count, **values,
+            "commitment_numbers": json.dumps(record.fields["commitment_numbers"].values, ensure_ascii=False),
+            "source_name": record.source_name, "page_number": record.page_number, "position": position,
+            "search_text": text.lower(),
+            "record": json.dumps(dataclasses.asdict(record), ensure_ascii=False),
+            "source": json.dumps({"index": source.index, "filename": source.filename, "kind": source.kind,
+                                  "page_count": source.page_count, "sha256": source.sha256,
+                                  "joined": source.joined}, ensure_ascii=False),
+            "parked_at": stamp, "updated_at": stamp,
+        })
+    keep = [w["record_id"] for w in waiting]
+    with _LOCK, _pending_conn(path) as conn:
+        # טפסים של ההעלאה הזו שכבר לא ממתינים (אושרו, חוברו לטופס אחר) — יוצאים מהרשימה
+        for row in conn.execute("SELECT record_id FROM pending_forms WHERE batch_id = ?", (batch.batch_id,)).fetchall():
+            if row["record_id"] not in keep:
+                conn.execute("DELETE FROM pending_forms WHERE record_id = ?", (row["record_id"],))
+        for item in waiting:
+            # אותו עמוד שהועלה שוב — השורה הישנה מתחלפת, לא מתווספת
+            conn.execute("DELETE FROM pending_forms WHERE form_key = ? AND record_id != ?",
+                         (item["form_key"], item["record_id"]))
+            columns = ", ".join(item)
+            marks = ", ".join(f":{c}" for c in item)
+            updates = ", ".join(f"{c} = excluded.{c}" for c in item if c not in ("record_id", "parked_at"))
+            conn.execute(f"INSERT INTO pending_forms ({columns}) VALUES ({marks}) "
+                         f"ON CONFLICT(record_id) DO UPDATE SET {updates}", item)
+    return len(waiting)
+
+
+def unpark(record_id: str, page_png: Path | None = None, path: Path | None = None) -> None:
+    """The form was approved — it no longer waits (also any older copy of the same page)."""
+    key = form_key(page_png) if page_png is not None and page_png.is_file() else None
+    with _LOCK, _pending_conn(path) as conn:
+        conn.execute("DELETE FROM pending_forms WHERE record_id = ?", (record_id,))
+        if key:
+            conn.execute("DELETE FROM pending_forms WHERE form_key = ?", (key,))
+
+
+def list_pending(q: str = "", sender: str = "", limit: int = LIST_LIMIT, path: Path | None = None) -> dict:
+    """Every form waiting for approval — all of them, oldest first: it is the to-do list."""
+    clauses, params = ["1 = 1"], []
+    if q.strip():
+        clauses.append("search_text LIKE ?")
+        params.append(f"%{q.strip().lower()}%")
+    if sender.strip():
+        clauses.append("sending_entity = ?")
+        params.append(sender.strip())
+    where = " AND ".join(clauses)
+    with _LOCK, _pending_conn(path) as conn:
+        total = conn.execute(f"SELECT COUNT(*) AS n FROM pending_forms WHERE {where}", params).fetchone()["n"]
+        everyone = conn.execute("SELECT COUNT(*) AS n FROM pending_forms").fetchone()["n"]
+        senders = [r["sending_entity"] for r in conn.execute(
+            "SELECT DISTINCT sending_entity FROM pending_forms WHERE sending_entity != '' ORDER BY sending_entity")]
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT * FROM pending_forms WHERE {where} ORDER BY parked_at, batch_id, position LIMIT {int(limit)}",
+            params)]
+    for row in rows:
+        row["commitment_numbers"] = json.loads(row["commitment_numbers"] or "[]")
+        for heavy in ("record", "source", "search_text"):
+            row.pop(heavy, None)
+    return {"rows": rows, "total": total, "all": everyone, "senders": senders, "truncated": len(rows) < total}
+
+
+def pending_count(path: Path | None = None) -> int:
+    with _LOCK, _pending_conn(path) as conn:
+        return conn.execute("SELECT COUNT(*) AS n FROM pending_forms").fetchone()["n"]
+
+
+def pending_batch_of(record_id: str, path: Path | None = None) -> str | None:
+    with _LOCK, _pending_conn(path) as conn:
+        row = conn.execute("SELECT batch_id FROM pending_forms WHERE record_id = ?", (record_id,)).fetchone()
+    return row["batch_id"] if row else None
+
+
+def load_pending_batch(batch_id: str, path: Path | None = None) -> Batch | None:
+    """The waiting forms of one upload, rebuilt for the review screen — no reading again."""
+    with _LOCK, _pending_conn(path) as conn:
+        rows = conn.execute("SELECT record, source FROM pending_forms WHERE batch_id = ? ORDER BY position",
+                            (batch_id,)).fetchall()
+    if not rows:
+        return None
+    batch = Batch(batch_id=batch_id, status="completed")
+    for row in rows:
+        record = record_from_json(row["record"])
+        source = json.loads(row["source"])
+        if not any(s.index == source["index"] for s in batch.sources):
+            batch.sources.append(SourceFile(**source))
+        batch.records.append(record)
+        batch.pages.append({"source_index": record.source_index, "page_number": record.page_number,
+                            "status": "failed" if record.error else "done", "record_id": record.record_id})
+    batch.sources.sort(key=lambda s: s.index)
+    batch.total_pages = batch.processed_pages = batch.found_pages = len(batch.records)
+    return batch

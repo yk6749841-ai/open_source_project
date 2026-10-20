@@ -53,7 +53,7 @@
     <ol id="crumbs">
       <li class="moh-only">משרד הבריאות</li>
       <li class="moh-only">המעבדה המרכזית לנגיפים</li>
-      <li aria-current="page">קליטת טפסי התחייבות</li>
+      <li class="dyn" aria-current="page">קליטת טפסי התחייבות</li>
     </ol>
   </nav>
 
@@ -196,7 +196,10 @@
         <button class="secondary back" id="backToTiles">→ כל הטפסים</button>
         <strong id="formWhere">1 / 1</strong>
         <span id="formBadge"></span>
+        <span class="formtype" id="formType"></span>
         <span class="grow"></span>
+        <!-- עמוד עם שני טפסים: המזכירה מחליטה לפצל (בחינם, בלי קריאה נוספת); בחלק שפוצל — "בטל פיצול" -->
+        <button class="secondary splitbtn hidden" id="fvSplit"></button>
         <button class="iconbtn" id="prevForm" aria-label="הטופס הקודם" title="הטופס הקודם">→</button>
         <button class="iconbtn" id="nextForm" aria-label="הטופס הבא" title="הטופס הבא">←</button>
       </div>
@@ -204,6 +207,8 @@
       <div class="failbar hidden" id="fvFailed" role="status" aria-live="polite"></div>
       <!-- טופס שחובר אוטומטית משני חצאים: מה חובר, וכפתור "הפרד" (בחינם) -->
       <div class="failbar joinbar hidden" id="fvJoined" role="status" aria-live="polite"></div>
+      <!-- טופס שכבר אושר בעבר: הערכים מהמערכת, לא מקריאת הטופס -->
+      <div class="failbar joinbar hidden" id="fvStored" role="status" aria-live="polite"></div>
       <div class="viewer">
         <div class="frame" id="fvFrame"></div>
         <!-- תקריב קבוע ליד הטופס: נפתח בלחיצה על ריבוע שדה -->
@@ -226,6 +231,12 @@
   <section id="recordsPage" class="strip hidden" aria-labelledby="recTitle">
     <h2 class="sr-only" id="recTitle">רשומות במערכת</h2>
 
+    <!-- מאושרים | ממתינים לאישור (טפסים שנקראו ולא אושרו — נשמרים כשסוגרים או מתחילים העלאה חדשה) -->
+    <div class="recmode" id="recMode" role="tablist" aria-label="סוג הטפסים">
+      <button role="tab" aria-selected="true" data-mode="approved" id="modeApproved">✓ מאושרים</button>
+      <button role="tab" aria-selected="false" data-mode="pending" id="modePending">⏳ ממתינים לאישור <b id="pendingN"></b></button>
+    </div>
+
     <div class="card recpanel" role="search" aria-label="סינון הטפסים המאושרים">
       <div class="recbar">
         <div class="recsearch">
@@ -236,7 +247,7 @@
           <span>גורם שולח</span>
           <select id="recSender"><option value="">כל הגורמים</option></select>
         </label>
-        <div class="recfield">
+        <div class="recfield" id="recRangeField">
           <span id="recRangeLabel">תאריך אישור</span>
           <div class="recseg" id="recRange" role="radiogroup" aria-labelledby="recRangeLabel">
             <button role="radio" aria-checked="true" tabindex="0" data-range="today">היום</button>
@@ -284,7 +295,7 @@
         <thead><tr>
           <th scope="col">שם פרטי</th><th scope="col">שם משפחה</th><th scope="col">ת״ז</th>
           <th scope="col">מספר מרכזי</th><th scope="col">תאריך קבלה</th><th scope="col">גורם שולח</th>
-          <th scope="col">מספר התחייבות</th><th scope="col">מקור</th><th scope="col">אושר</th>
+          <th scope="col">מספר התחייבות</th><th scope="col">מקור</th><th scope="col" id="recWhenHead">אושר</th>
           <th scope="col"><span class="sr-only">פעולות</span></th>
         </tr></thead>
         <tbody id="recBody"></tbody>
@@ -353,6 +364,23 @@
   </div>
 </div>
 
+<!-- שינוי בטופס שהגיע מהמערכת: שואלים קודם. ברירת המחדל: ביטול -->
+<div id="storeConfirm" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="stTitle" aria-describedby="stText">
+  <div class="modalbox rrbox">
+    <div class="modalhead">
+      <div>
+        <h2 id="stTitle">לשנות נתונים מהמערכת?</h2>
+        <p class="sub" id="stText">הנתונים בטופס הזה הגיעו מהמערכת — הם כבר נבדקו ואושרו בעבר. אם תשני אותם, יהיה צריך לאשר את הטופס שוב. להמשיך?</p>
+      </div>
+    </div>
+    <div class="modalfoot">
+      <span class="grow"></span>
+      <button class="secondary" id="stCancel">ביטול</button>
+      <button class="primary" id="stYes">✎ כן, לשנות</button>
+    </div>
+  </div>
+</div>
+
 <!-- מחיקת רשומה: לא הפיך, ולכן שואלים קודם. ברירת המחדל: ביטול -->
 <div id="delConfirm" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="delTitle" aria-describedby="delText">
   <div class="modalbox rrbox">
@@ -371,6 +399,26 @@
 </div>
 
 <!-- חיבור ידני של שני חלקים של טופס חתוך: בוחרים את החלק השני, ואז מי למעלה. בלי עלות. -->
+<div id="splitPick" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="spTitle" aria-describedby="spText">
+  <div class="modalbox spbox">
+    <div class="modalhead">
+      <div>
+        <h2 id="spTitle">לפצל את העמוד לשני טפסים?</h2>
+        <p class="sub" id="spText">בוחרים איך שני הטפסים מסודרים בעמוד. בחינם, בלי קריאה נוספת: כל ערך עובר לטופס שבו הוא נמצא בעמוד, וכל השדות יסומנו לבדיקה. אפשר לבטל את הפיצול אחר כך.</p>
+      </div>
+    </div>
+    <div class="splist" role="radiogroup" aria-label="סידור הטפסים בעמוד">
+      <button class="spitem" role="radio" aria-checked="true" data-axis="y"><span class="spicon spicon-y" aria-hidden="true"><i></i><i></i></span>אחד מעל השני</button>
+      <button class="spitem" role="radio" aria-checked="false" data-axis="x"><span class="spicon spicon-x" aria-hidden="true"><i></i><i></i></span>זה לצד זה</button>
+    </div>
+    <div class="modalfoot">
+      <span class="grow"></span>
+      <button class="secondary" id="spCancel">ביטול</button>
+      <button class="primary" id="spGo">✂ פצל לשני טפסים</button>
+    </div>
+  </div>
+</div>
+
 <div id="joinPick" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="jpTitle" aria-describedby="jpText">
   <div class="modalbox jpbox">
     <div class="modalhead">
@@ -406,22 +454,6 @@
   </div>
 </div>
 
-<!-- אישור לפני קליטה חדשה כשיש טפסים שעוד לא אושרו (המאושרים כבר שמורים במסד) -->
-<div id="newConfirm" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="ncTitle" aria-describedby="ncText">
-  <div class="modalbox rrbox">
-    <div class="modalhead">
-      <div>
-        <h2 id="ncTitle">להתחיל קליטה חדשה?</h2>
-        <p class="sub" id="ncText"></p>
-      </div>
-    </div>
-    <div class="modalfoot">
-      <span class="grow"></span>
-      <button class="secondary" id="ncCancel">ביטול</button>
-      <button class="primary" id="ncYes">⬆ כן, קליטה חדשה</button>
-    </div>
-  </div>
-</div>
 
 <!-- הגדלת הטופס: העמוד בגדול על כל המסך, עם + / −, גרירה וגלגלת -->
 <div id="pgZoom" class="pzmodal hidden" role="dialog" aria-modal="true" aria-labelledby="pzTitle">

@@ -136,8 +136,9 @@ def test_filters_search_sender_and_received_date():
 
 
 def test_same_commitment_number_in_another_form_is_flagged_not_merged():
-    one = _batch("bat_i", {"first_name": ["א"], "commitment_numbers": ["7254647"]})
-    two = _batch("bat_j", {"first_name": ["ב"], "commitment_numbers": ["7254647"]},
+    # ת"ז שונה — לא אותו טופס, ולכן לא נדרס (החלטת נועה, 20/10/2026)
+    one = _batch("bat_i", {"first_name": ["א"], "national_id": ["111111118"], "commitment_numbers": ["7254647"]})
+    two = _batch("bat_j", {"first_name": ["ב"], "national_id": ["222222226"], "commitment_numbers": ["7254647"]},
                  {"first_name": ["ג"], "commitment_numbers": ["111"]}, shade=9)
     for record in (*one.records, *two.records):
         _approve(record)
