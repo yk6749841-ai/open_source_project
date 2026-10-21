@@ -1586,13 +1586,20 @@ def test_no_sample_button_without_a_sample_file(monkeypatch, tmp_path):
 
 
 def test_index_serves_split_static_files():
+    import re
+
     from app import api as api_module
 
     client = TestClient(api_module.app)
     html = client.get("/").text
-    assert "/static/app.css?v=" in html and "/static/app.js?v=" in html and "{{v}}" not in html
-    assert client.get("/static/app.js").status_code == 200
+    # המסך ב-React: אותו קובץ עיצוב (/static/app.css), והקוד מהבנייה (/app/assets/...)
+    assert "/static/app.css?v=" in html and "{{v}}" not in html
+    for asset in re.findall(r'(/app/assets/[^"]+\.js)', html):
+        assert client.get(asset).status_code == 200
     assert client.get("/static/app.css").status_code == 200
+    # המסך הקודם (JavaScript רגיל) כבר לא מוגש — רק React
+    assert client.get("/classic").status_code == 404
+    assert "/static/app.js" not in html
 
 
 # ---------------- 18/10/2026: Ministry of Health branding through a theme
@@ -1613,9 +1620,13 @@ def test_page_shows_ministry_branding_without_a_demo_label():
     from app import api as api_module
 
     client = TestClient(api_module.app)
+    import re
+
     html = client.get("/").text
-    assert "/static/brand/moh-office.png" in html and "משרד הבריאות" in html
-    assert "דמו להאקתון" not in html
+    # React מצייר את המסך בדפדפן — המיתוג נמצא בקוד שהדף טוען
+    code = html + "".join(client.get(a).text for a in re.findall(r'(/app/assets/[^"]+\.js)', html))
+    assert "/static/brand/moh-office.png" in code and "משרד הבריאות" in code
+    assert "דמו להאקתון" not in code
     assert client.get("/static/brand/moh-office.png").status_code == 200
     # the gov.il typeface ships with the app, so the page looks right without internet access
     assert client.get("/static/fonts/rubik-hebrew.woff2").status_code == 200

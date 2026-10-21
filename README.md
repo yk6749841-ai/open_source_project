@@ -21,6 +21,23 @@ uv run serve   # נפתח אוטומטית בדפדפן ב-http://127.0.0.1:8000
 - Linux / Docker: `apt-get install tesseract-ocr`.
 - נמצא אוטומטית ב-PATH או ב-`C:\Program Files\Tesseract-OCR`. אחרת: `TESSERACT_CMD=` ב-`.env`.
 
+### המסך (React)
+
+הבנייה (`backend/app/web/dist`) שמורה ב-Git, ולכן `uv run serve` מספיק — אין צורך ב-Node כדי להריץ.
+רק אחרי שינוי בקוד המסך:
+
+```powershell
+cd frontend
+npm ci          # פעם אחת
+npm run build   # בדיקת טיפוסים (tsc) + בנייה אל backend/app/web/dist
+```
+
+- **איך המראה נשאר זהה:** הרכיבים של MUI (כפתורים, חלונות) נכנסים לשכבת CSS נמוכה (`@layer mui`), והעיצוב
+  הקיים (`app.css`) גובר תמיד. MUI מוסיף התנהגות: פוקוס שנשאר בתוך חלון, Esc, נגישות, ימין-לשמאל.
+- **נבדק מול המסך הקודם** בדפדפן אמיתי, בחינם: 11 מסכים וחלונות זהים לפיקסל (כולל מצב כהה), וכל המסלולים
+  נותנים תוצאה זהה — העלאה, אישור עד הקונפטי, ייצוא, רשומות, ממתינים, ניווט אחורה/קדימה, טופס מהמערכת,
+  חיבור חצאים, פיצול, עזרה ותשובת הממונה.
+
 ## מה צריך ב-`.env`
 
 ```
@@ -56,7 +73,10 @@ ANTHROPIC_API_KEY=...
 | [backend/app/providers/base.py](backend/app/providers/base.py) | החוזה. מודל אחר (גם פנימי) = מתאם חדש, בלי לגעת בשאר הקוד |
 | [backend/app/providers/claude_vision.py](backend/app/providers/claude_vision.py) | הקובץ **היחיד** שמייבא SDK של ספק |
 | [backend/app/api.py](backend/app/api.py) | ה-API |
-| [backend/app/web/index.html](backend/app/web/index.html) | הממשק כולו — דף אחד, ללא build |
+| [frontend/](frontend/) | **המסך: React 18 + TypeScript + Vite + MUI 7**, ימין-לשמאל. נבנה אל `backend/app/web/dist` |
+| [frontend/src/actions.ts](frontend/src/actions.ts) | כל הלוגיקה של המסך (העלאה, בדיקה, אישור, עזרה, רשומות, ניווט) |
+| [frontend/src/store.ts](frontend/src/store.ts) | מצב המסך במקום אחד; React מצייר לפיו |
+| [backend/app/web/app.css](backend/app/web/app.css) | העיצוב (gov.il) — **אותו קובץ** למסך React ולמסך הקודם |
 
 ## כללים שהמערכת שומרת
 

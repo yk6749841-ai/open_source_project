@@ -39,15 +39,30 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 SAMPLE_PATH = PROJECT_ROOT / "samples" / "demo-form.pdf"
 THUMB_WIDTH = 240
 
+# המסך ב-React (frontend/, נבנה עם "npm run build" אל web/dist). העיצוב נשאר /static/app.css.
+DIST_DIR = WEB_DIR / "dist"
+
 app = FastAPI(title="טופס למידע", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+if (DIST_DIR / "assets").is_dir():
+    app.mount("/app/assets", StaticFiles(directory=DIST_DIR / "assets"), name="app-assets")
+
+
+def _version() -> str:
+    # גרסה לפי זמן השינוי של הקבצים — הדפדפן לא יציג CSS/JS ישנים אחרי עדכון.
+    return str(max(int(p.stat().st_mtime) for p in WEB_DIR.glob("app.*")))
 
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    # גרסה לפי זמן השינוי של הקבצים — הדפדפן לא יציג CSS/JS ישנים אחרי עדכון.
-    version = str(max(int(p.stat().st_mtime) for p in WEB_DIR.glob("app.*")))
-    html = (WEB_DIR / "index.html").read_text(encoding="utf-8").replace("{{v}}", version)
+    """The screen: React (frontend/, built into web/dist; the design is /static/app.css)."""
+    return react_index()
+
+
+def react_index() -> HTMLResponse:
+    if not (DIST_DIR / "index.html").is_file():
+        raise HTTPException(503, "המסך לא נבנה — npm run build בתיקייה frontend.")
+    html = (DIST_DIR / "index.html").read_text(encoding="utf-8").replace("{{v}}", _version())
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
@@ -340,7 +355,10 @@ def help_page(token: str) -> HTMLResponse:
     """The page the manager opens from the link — only this one field, nothing else."""
     if db.help_get(token) is None:
         raise HTTPException(404, "הבקשה לא נמצאה.")
-    html = (WEB_DIR / "help.html").read_text(encoding="utf-8")
+    built = DIST_DIR / "help.html"
+    if not built.is_file():
+        raise HTTPException(503, "המסך לא נבנה — npm run build בתיקייה frontend.")
+    html = built.read_text(encoding="utf-8")
     return HTMLResponse(html, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
                                        "X-Robots-Tag": "noindex"})
 
