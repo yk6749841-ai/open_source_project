@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>בקשת עזרה בבדיקת טופס</title>
+<link rel="icon" href="/static/brand/moh-office.png">
+<!-- הדף שהממונה פותח מהקישור: רק השדה ששאלו עליו — לא הטופס, לא שם המטופל, לא שדות אחרים -->
+<style>
+  :root{--primary:#0068f5;--primary-h:#015dd9;--title:#0c306a;--ink:#0c3058;--muted:#5878a4;--line:#e6ebf2;
+    --bg:#f7f9fd;--card:#fff;--soft:#f3f7ff;--amber:#a8540a;--amber-bg:#fff4e5;--ok:#2d7a4f;--ok-bg:#e9f6ee;
+    --govbar:linear-gradient(93deg,#025fdb,#025fdb 35%,#0b3668)}
+  @media (prefers-color-scheme: dark){:root{--primary:#5aa3ff;--primary-h:#7ab6ff;--title:#cfe0f4;--ink:#e6edf5;
+    --muted:#a2b2c6;--line:#27384e;--bg:#0e1724;--card:#152236;--soft:#1a2a40;--amber:#ffbf73;--amber-bg:#3a2a14;
+    --ok:#7fd6a3;--ok-bg:#16301f}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 "Rubik","Segoe UI",Arial,sans-serif}
+  .govbar{background:var(--govbar);color:#fff;padding:.8rem 1rem;font-weight:600}
+  .govbar .inner,main{max-width:40rem;margin:0 auto}
+  main{padding:1.2rem 1rem 3rem}
+  h1{color:var(--title);font-size:1.5rem;margin:.2rem 0 .3rem}
+  .sub{color:var(--muted);margin:0 0 1rem}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1.1rem;margin-bottom:1rem}
+  .q{background:var(--soft);border-radius:10px;padding:.7rem .9rem;margin:.2rem 0 0;white-space:pre-wrap}
+  .crop{display:block;max-width:100%;border:1px solid var(--line);border-radius:8px;margin:.6rem 0;background:#fff}
+  .lbl{display:block;font-weight:600;color:var(--title);margin:.9rem 0 .4rem}
+  .opts{display:flex;flex-wrap:wrap;gap:.5rem}
+  .opt{font:inherit;font-size:1.1rem;font-weight:600;padding:.55rem 1rem;border:2px solid var(--line);border-radius:10px;
+    background:var(--card);color:var(--ink);cursor:pointer;font-variant-numeric:tabular-nums}
+  .opt[aria-checked="true"]{border-color:var(--primary);box-shadow:0 0 0 3px rgba(0,104,245,.15)}
+  input,textarea{width:100%;font:inherit;padding:.6rem .7rem;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+  textarea{min-height:5rem;resize:vertical}
+  button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid var(--primary);outline-offset:2px}
+  .send{margin-top:1.1rem;width:100%;font:inherit;font-weight:600;font-size:1.05rem;padding:.8rem;border:0;border-radius:50px;
+    background:var(--primary);color:#fff;cursor:pointer}
+  .send:hover{background:var(--primary-h)}
+  .send:disabled{opacity:.6;cursor:default}
+  .err{color:var(--amber);background:var(--amber-bg);border-radius:8px;padding:.6rem .8rem;margin-top:.8rem}
+  .done{color:var(--ok);background:var(--ok-bg);border-radius:10px;padding:1rem;font-weight:600}
+  .note{color:var(--muted);font-size:.85rem;margin-top:1rem}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<div class="govbar"><div class="inner">מערכת קליטת טפסי התחייבות · בקשת עזרה</div></div>
+<main>
+  <h1 id="title">בקשת עזרה</h1>
+  <p class="sub" id="who">טוען…</p>
+
+  <section class="card" id="ask" aria-labelledby="title">
+    <div id="question"></div>
+    <div id="crops"></div>
+  </section>
+
+  <section class="card hidden" id="form" aria-label="התשובה">
+    <span class="lbl" id="optsLabel">מה הערך הנכון?</span>
+    <div class="opts" id="opts" role="radiogroup" aria-labelledby="optsLabel"></div>
+    <label class="lbl" for="other">ערך אחר (אם אף אחד מהם לא נכון)</label>
+    <input id="other" autocomplete="off">
+    <label class="lbl" for="note">הערה (לא חובה)</label>
+    <textarea id="note"></textarea>
+    <label class="lbl" for="name">השם שלך</label>
+    <input id="name" autocomplete="name">
+    <button class="send" id="send">שליחת התשובה</button>
+    <div class="err hidden" id="err" role="alert"></div>
+  </section>
+
+  <section class="card hidden" id="answered" role="status" aria-live="polite"></section>
+
+  <p class="note">מוצג כאן רק השדה ששאלו עליו. ההחלטה הסופית נשארת אצל מי ששאלה. נא לא להעביר את הקישור הלאה.</p>
+</main>
+<script>
+(function(){
+  const token = location.pathname.split('/').filter(Boolean).pop();
+  const $ = function(id){ return document.getElementById(id); };
+  const esc = function(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+  const LTR = ['national_id', 'central_numbers', 'commitment_numbers', 'sample_received_date'];
+  let req = null, chosen = '', sentValue = '', sentNote = '';
+
+  function bdi(v){ return '<bdi dir="' + (LTR.indexOf(req.field) !== -1 ? 'ltr' : 'rtl') + '">' + esc(v) + '</bdi>'; }
+
+  function showAnswered(){
+    $('form').classList.add('hidden');
+    const box = $('answered');
+    box.classList.remove('hidden');
+    if (req.status === 'expired') {
+      box.innerHTML = '<b>פג תוקף הקישור</b> (הוא עובד 48 שעות). אם עדיין צריך עזרה — בקשו מ' +
+        esc(req.asker || 'המזכירה') + ' לשלוח קישור חדש.';
+      return;
+    }
+    if (req.status === 'canceled' || req.status === 'closed' && !req.answered_at) {
+      box.innerHTML = '<b>הבקשה כבר לא פעילה.</b> אין צורך לענות.';
+      return;
+    }
+    // הערך שנשלח מוצג רק מיד אחרי השליחה (מהדף עצמו) — השרת כבר לא מחזיר אותו
+    box.innerHTML = '<div class="done">✓ התשובה נשלחה' + (req.asker ? ' ל' + esc(req.asker) : '') + '. תודה!</div>' +
+      (sentValue ? '<p>הערך: <b>' + bdi(sentValue) + '</b></p>' : '') +
+      (sentNote ? '<p>הערה: ' + esc(sentNote) + '</p>' : '') +
+      (req.answered_by ? '<p class="note">ענה/תה: ' + esc(req.answered_by) + '</p>' : '');
+  }
+
+  function show(){
+    $('title').textContent = 'עזרה בשדה: ' + req.label;
+    $('who').textContent = (req.asker || 'המזכירה') + ' מתלבטת בשדה הזה בטופס התחייבות, ומבקשת את עזרתך.';
+    $('question').innerHTML = req.question ? '<span class="lbl">השאלה</span><p class="q">' + esc(req.question) + '</p>' : '';
+    let crops = '';
+    for (let i = 0; i < req.crops; i++) {
+      crops += '<img class="crop" alt="תקריב של השדה ' + esc(req.label) + '" src="/api/help/' + encodeURIComponent(token) + '/crops/' + i + '">';
+    }
+    $('crops').innerHTML = crops ? '<span class="lbl">מה כתוב בטופס</span>' + crops : '';
+    if (req.status !== 'open') return showAnswered();
+    $('form').classList.remove('hidden');
+    $('optsLabel').textContent = req.options.length > 1 ? 'איזה מהערכים נכון?' : req.options.length ? 'האם זה הערך הנכון?' : 'מה הערך הנכון?';
+    $('opts').innerHTML = req.options.map(function(v, i){
+      return '<button class="opt" role="radio" aria-checked="false" data-i="' + i + '">' + bdi(v) + '</button>';
+    }).join('');
+    $('opts').querySelectorAll('.opt').forEach(function(b){
+      b.onclick = function(){
+        const v = req.options[Number(b.dataset.i)];
+        chosen = chosen === v ? '' : v;
+        $('opts').querySelectorAll('.opt').forEach(function(x){ x.setAttribute('aria-checked', x === b && chosen ? 'true' : 'false'); });
+        if (chosen) $('other').value = '';
+      };
+    });
+    if (LTR.indexOf(req.field) !== -1) $('other').dir = 'ltr';
+    $('other').oninput = function(){
+      if ($('other').value.trim()) { chosen = ''; $('opts').querySelectorAll('.opt').forEach(function(x){ x.setAttribute('aria-checked', 'false'); }); }
+    };
+    try { $('name').value = localStorage.getItem('helpName') || ''; } catch (e) {}
+  }
+
+  $('send').onclick = async function(){
+    const value = chosen || $('other').value.trim();
+    const note = $('note').value.trim();
+    $('err').classList.add('hidden');
+    if (!value && !note) { $('err').textContent = 'יש לבחור ערך, לכתוב ערך אחר, או לכתוב הערה.'; $('err').classList.remove('hidden'); return; }
+    const name = $('name').value.trim();
+    try { localStorage.setItem('helpName', name); } catch (e) {}
+    $('send').disabled = true;
+    const res = await fetch('/api/help/' + encodeURIComponent(token) + '/answer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: value, note: note, name: name })
+    });
+    const d = await res.json().catch(function(){ return {}; });
+    $('send').disabled = false;
+    if (!res.ok) { $('err').textContent = d.detail || 'השליחה לא הצליחה — נסו שוב.'; $('err').classList.remove('hidden'); return; }
+    sentValue = value;
+    sentNote = note;
+    req = d;
+    showAnswered();
+  };
+
+  fetch('/api/help/' + encodeURIComponent(token)).then(function(res){
+    if (!res.ok) throw new Error();
+    return res.json();
+  }).then(function(d){ req = d; show(); }).catch(function(){
+    $('title').textContent = 'הבקשה לא נמצאה';
+    $('who').textContent = 'ייתכן שהקישור לא שלם.';
+    $('ask').classList.add('hidden');
+  });
+})();
+</script>
+</body>
+</html>

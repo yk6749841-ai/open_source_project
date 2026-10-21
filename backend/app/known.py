@@ -16,7 +16,7 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
-from app import db
+from app import db, rules
 from app.models import STATE_APPROVED, FormRecord
 
 
@@ -52,6 +52,7 @@ def from_saved(record: FormRecord, saved: dict, same_page: bool) -> None:
     record.model_note = ""
     record.verified = True
     record.from_store = saved.get("approved_at") or ""
+    rules.reopen_broken(record)  # אושר לפני הכללים ואינו עומד בהם — השדות האלה כתומים, הטופס לאישור מחדש
 
 
 def apply_known(records: list[FormRecord]) -> int:

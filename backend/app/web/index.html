@@ -419,6 +419,86 @@
   </div>
 </div>
 
+<!-- 🙋 עזרה: קישור לממונה בוואטסאפ או במייל. בהודעה אין פרטי מטופל — רק הקישור -->
+<div id="helpAsk" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="haTitle" aria-describedby="haText">
+  <div class="modalbox habox">
+    <div class="modalhead">
+      <div>
+        <h2 id="haTitle">🙋 בקשת עזרה</h2>
+        <p class="sub" id="haText">נשלח קישור לממונה. <b>בהודעה עצמה אין פרטי מטופל</b> — רק הקישור. מי שפותח אותו רואה רק את התקריב של השדה הזה ועונה. עד שתגיע תשובה (או שתבטלי את הבקשה) השדה לא יאושר, וההחלטה נשארת שלך.</p>
+      </div>
+    </div>
+    <div class="habody" id="haForm">
+      <div class="hacrops" id="haCrops"></div>
+      <p class="havalues" id="haValues"></p>
+      <label class="halbl" for="haQuestion">השאלה</label>
+      <textarea id="haQuestion" rows="2" maxlength="500"></textarea>
+      <small class="hahint">בלי פרטים מזהים — הממונה רואה את התקריב.</small>
+      <label class="halbl" for="haAsker">השם שלך (יופיע בהודעה)</label>
+      <input id="haAsker" maxlength="60" autocomplete="name">
+
+      <!-- איך לשלוח: קודם בוחרים דרך, ואז מסך נפרד לכל אחת (החלטת נועה, 21/10/2026) -->
+      <div class="hato">
+        <div id="haPick">
+          <span class="halbl" id="haPickLbl">איך לשלוח?</span>
+          <div class="hapick" role="group" aria-labelledby="haPickLbl">
+            <button class="hachan" data-pane="mail"><span class="haicon" aria-hidden="true">✉</span>מייל</button>
+            <button class="hachan" data-pane="wa"><span class="haicon wa" aria-hidden="true">✆</span>וואטסאפ</button>
+            <button class="hachan" data-pane="link"><span class="haicon" aria-hidden="true">🔗</span>קישור</button>
+          </div>
+        </div>
+
+        <div class="hapane hidden" id="haPaneMail" role="group" aria-label="שליחה במייל">
+          <button class="haback" data-pane="">→ חזרה</button>
+          <label class="halbl" for="haTo">למי לשלוח? — מייל של הממונה</label>
+          <input id="haTo" type="email" dir="ltr" list="haToList" maxlength="120" placeholder="name@example.com" autocomplete="email">
+          <datalist id="haToList"></datalist>
+          <div class="hasend">
+            <span class="hasendlbl">פתיחת מייל מוכן ב:</span>
+            <button class="primary" id="haGmail">Gmail</button>
+            <button class="primary" id="haOutlook">Outlook</button>
+            <button class="secondary" id="haMail" title="תוכנת המייל שמותקנת במחשב — רק אם יש כזו">תוכנת מייל</button>
+          </div>
+        </div>
+
+        <div class="hapane hidden" id="haPaneWa" role="group" aria-label="שליחה בוואטסאפ">
+          <button class="haback" data-pane="">→ חזרה</button>
+          <label class="halbl" for="haPhone">מספר הנייד של הממונה</label>
+          <input id="haPhone" type="tel" dir="ltr" list="haPhoneList" maxlength="20" placeholder="05X-XXXXXXX" autocomplete="tel">
+          <datalist id="haPhoneList"></datalist>
+          <small class="hahint">בלי מספר — וואטסאפ יבקש לבחור איש קשר.</small>
+          <div class="hasend">
+            <button class="primary" id="haWhatsapp">פתיחת וואטסאפ</button>
+          </div>
+        </div>
+
+        <div class="hapane hidden" id="haPaneLink" role="group" aria-label="קישור">
+          <button class="haback" data-pane="">→ חזרה</button>
+          <p class="hahint">יוצרים קישור ומעתיקים אותו — ואז מדביקים אותו בכל הודעה (Teams, SMS…).</p>
+          <div class="hasend">
+            <button class="primary" id="haCopy">🔗 העתקת קישור</button>
+          </div>
+        </div>
+        <p class="haerr hidden" id="haErr" role="alert"></p>
+      </div>
+      <p class="halocal hidden" id="haLocal">⚠ המערכת רצה עכשיו על המחשב הזה (localhost) — הקישור ייפתח רק במחשב הזה. בשרת המשותף הוא ייפתח מכל מקום.</p>
+    </div>
+
+    <!-- אחרי השליחה: החלון לא נסגר — אומרים בדיוק מה קרה ומה נשאר לעשות -->
+    <div class="habody hadone hidden" id="haDone" role="status" aria-live="polite">
+      <p class="hadonemain" id="haDoneText"></p>
+      <p class="hadonealt" id="haDoneAlt"></p>
+      <p class="sub">השדה מסומן ⏳ ממתין לתשובה. כשהממונה יענה, התשובה תופיע כאן לבד.</p>
+    </div>
+    <div class="modalfoot">
+      <button class="secondary" id="haCancel">ביטול</button>
+      <button class="secondary hidden" id="haAgain">שליחה שוב</button>
+      <span class="grow"></span>
+      <button class="primary hidden" id="haFinish">סיום</button>
+    </div>
+  </div>
+</div>
+
 <div id="joinPick" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="jpTitle" aria-describedby="jpText">
   <div class="modalbox jpbox">
     <div class="modalhead">

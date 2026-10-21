@@ -21,6 +21,8 @@ NAME_RE = re.compile(r"^[א-תA-Za-z\s\-־'׳״\".?]+$")
 CENTRAL_LENGTH = (5, 7)  # בכל הדוגמאות: 6 ספרות. רק טווח סביר — לא חוק
 MIN_COMMITMENT_LENGTH = 4  # בדוגמאות: מ-4 ספרות (2657) עד 12 — לכן רק "קצר מדי"
 MAX_RECEIVED_AGE_DAYS = 365
+# טקסט שנכתב במקום ערך: "לא ברור", "לא ניתן לזהות", "אין", "חסר", "-"… (rules.py חוסם אותו)
+PLACEHOLDER = re.compile(r"^\s*(לא(\s|$)|אין(\s|$)|חסר(\s|$)|ריק$|unknown$|n/?a$|null$|none$|[\-—–_.?\s]+$)", re.I)
 
 REASON_TEXT = {
     "missing": "השדה ריק — המודל לא מצא ערך",
@@ -53,6 +55,8 @@ REASON_TEXT = {
     "unknown_char": "בערך יש תו שלא נקרא (?) — יש לתקן לפני אישור",
     "split_page": "העמוד פוצל — לוודא שהערך שייך לטופס הזה",
     "joined_conflict": "שני חלקי הטופס נתנו ערכים שונים — לבחור",
+    "not_a_value": "נכתב טקסט במקום ערך — אם אין ערך, משאירים ריק (חסר)",
+    "breaks_rule": "הערך אינו עומד בכללי המערכת — יש לתקן לפני אישור",
 }
 
 
@@ -75,6 +79,9 @@ def validate_record(
         for value in field.values:
             if "?" in value:
                 field.flag("unknown_char")  # תו שלא נקרא — אי אפשר לאשר עד שמתקנים
+            elif PLACEHOLDER.match(value):
+                field.flag("not_a_value")  # "לא ברור" במקום ערך — אי אפשר לאשר (rules.py)
+                continue
             if spec.kind == "digits":
                 _check_digits(field, value, key)
             elif spec.kind == "date":

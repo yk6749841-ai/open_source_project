@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import shutil
 import traceback
 from datetime import datetime, timedelta
@@ -15,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from app import db, gold, halves, pipeline, store, twoforms
+from app import db, gold, halves, pipeline, rules, store, twoforms
 from app.config import PROJECT_ROOT, SETTINGS
 from app.crops import crop_field, padded
 from app.pages import ink_enhanced
@@ -289,6 +290,146 @@ def unsplit_page(record_id: str) -> dict:
     return {**_serialise(batch), "focus": original.record_id}
 
 
+# ------------------------------------------------------------ "🙋 עזרה" — שאלה לממונה, בלי פרטי מטופל בהודעה
+# המזכירה מתלבטת בשדה כתום → נוצר קישור עם מפתח אקראי. ההודעה (וואטסאפ/מייל) מכילה רק את הקישור;
+# מי שפותח אותו רואה את התקריב של השדה הזה בלבד ועונה. ההחלטה נשארת אצל המזכירה, והשדה לא
+# מאושר כל עוד הבקשה ממתינה (החלטת נועה, 21/10/2026). בחינם — בלי מודל.
+
+@app.post("/api/records/{record_id}/help")
+def ask_help(record_id: str, payload: dict) -> dict:
+    batch = _finished_batch_of(record_id)
+    record = next(r for r in batch.records if r.record_id == record_id)
+    key = payload.get("field")
+    if key not in record.fields:
+        raise HTTPException(400, "שדה לא מוכר.")
+    field = record.fields[key]
+    if record.verified or field.state == STATE_APPROVED:
+        raise HTTPException(409, "השדה כבר אושר — אין צורך בעזרה.")
+    active = db.help_active([record_id]).get((record_id, key))
+    if active is not None and active["expired"]:
+        db.help_expire(active["token"])  # הקישור הישן פג — נשאר בתיעוד, ונוצר קישור חדש
+        active = None
+    if active is None:
+        token = secrets.token_urlsafe(18)
+        regions = ([r for r in field.value_regions if r] if len(field.value_regions) == len(field.values) > 1
+                   else [field.region] if field.region else [])
+        page = pipeline.page_image_path(batch.batch_id, record.source_index, record.page_number)
+        crops = 0
+        if page.is_file():
+            for region in regions:
+                crop_field(page, region, db.HELP_DIR / f"{token}-{crops}.png")
+                crops += 1
+        active = db.help_create(token, record_id, batch.batch_id, key,
+                                str(payload.get("question", "")).strip()[:500],
+                                str(payload.get("asker", "")).strip()[:60], list(field.values), crops)
+    _changed(batch, record)
+    return {**_serialise(batch), "help_token": active["token"]}
+
+
+@app.post("/api/records/{record_id}/help/cancel")
+def cancel_help(record_id: str, payload: dict) -> dict:
+    batch = _finished_batch_of(record_id)
+    record = next(r for r in batch.records if r.record_id == record_id)
+    db.help_close(record_id, str(payload.get("field", "")), "canceled")
+    _changed(batch, record)
+    return _serialise(batch)
+
+
+@app.get("/help/{token}", response_class=HTMLResponse)
+def help_page(token: str) -> HTMLResponse:
+    """The page the manager opens from the link — only this one field, nothing else."""
+    if db.help_get(token) is None:
+        raise HTTPException(404, "הבקשה לא נמצאה.")
+    html = (WEB_DIR / "help.html").read_text(encoding="utf-8")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+                                       "X-Robots-Tag": "noindex"})
+
+
+@app.get("/api/help/{token}")
+def help_request(token: str) -> dict:
+    found = db.help_get(token)
+    if found is None:
+        raise HTTPException(404, "הבקשה לא נמצאה.")
+    live = found["status"] == "open" and not found["expired"]
+    # רק בקשה פתוחה מציגה ערכים ותקריב. אחרי תשובה / ביטול / 48 שעות — רק המצב, גם אם הקישור הועבר הלאה
+    return {
+        "field": found["field"], "label": FIELDS_BY_KEY[found["field"]].label_he,
+        "question": found["question"] if live else "", "asker": found["asker"],
+        "options": found["options"] if live else [], "crops": found["crops"] if live else 0,
+        "status": "expired" if found["expired"] else found["status"], "created_at": found["created_at"],
+        "answered_by": found["answered_by"], "answered_at": found["answered_at"],
+    }
+
+
+@app.get("/api/help/{token}/crops/{index}")
+def help_crop(token: str, index: int) -> FileResponse:
+    found = db.help_get(token)
+    target = db.HELP_DIR / f"{token}-{index}.png"
+    if (found is None or found["status"] != "open" or found["expired"]
+            or not 0 <= index < found["crops"] or not target.is_file()):
+        raise HTTPException(404, "אין תקריב.")
+    return FileResponse(target, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/help/{token}/answer")
+def answer_help(token: str, payload: dict) -> dict:
+    found = db.help_get(token)
+    if found is None:
+        raise HTTPException(404, "הבקשה לא נמצאה.")
+    if found["status"] != "open":
+        raise HTTPException(409, "כבר ענו על הבקשה הזו, או שהיא בוטלה.")
+    if found["expired"]:
+        raise HTTPException(410, "פג תוקף הקישור — בקשי מהמזכירה לשלוח שוב.")
+    value = str(payload.get("value", "")).strip()
+    note = str(payload.get("note", "")).strip()[:500]
+    if not value and not note:
+        raise HTTPException(400, "יש לבחור ערך או לכתוב הערה.")
+    if value:
+        broken = rules.problems(found["field"], [value])
+        if broken:
+            raise HTTPException(422, " · ".join(broken))
+    db.help_answer(token, value, note, str(payload.get("name", "")).strip()[:60])
+    return help_request(token)
+
+
+def _help_of(batch: Batch) -> dict[tuple[str, str], dict]:
+    """Active help requests of this upload. A database problem never breaks the screen."""
+    try:
+        return db.help_active([r.record_id for r in batch.records])
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return {}
+
+
+def _help_view(found: dict | None) -> dict | None:
+    """What the review screen needs about a field's request — the link key, state and answer."""
+    if found is None:
+        return None
+    return {key: found[key] for key in ("token", "status", "question", "asker", "created_at", "expired",
+                                         "answer_value", "answer_note", "answered_by", "answered_at")}
+
+
+def _waiting_help(record_id: str, key: str | None = None) -> list[str]:
+    """Fields of this form still waiting for an answer — they can't be approved yet."""
+    try:
+        active = db.help_active([record_id])
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return []
+    return [FIELDS_BY_KEY[f].label_he for (_, f), h in active.items()
+            if h["status"] == "open" and (key is None or f == key)]
+
+
+def _decided(record_id: str, key: str) -> None:
+    """The secretary fixed or approved the field herself: its request is done (an answer that
+    arrives later is refused — she already decided). Approving is refused earlier while waiting."""
+    try:
+        if db.help_active([record_id]).get((record_id, key)):
+            db.help_close(record_id, key, "closed")
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+
+
 def _finished_batch_of(record_id: str) -> Batch:
     found = store.find_record(record_id)
     if found is None:
@@ -318,6 +459,12 @@ def verify_record(record_id: str, payload: dict | None = None) -> dict:
     unknown = [FIELDS_BY_KEY[k].label_he for k, f in record.fields.items() if _has_unknown(f.values)]
     if unknown:
         raise HTTPException(409, "יש תו שלא נקרא (?) ב: " + ", ".join(unknown) + " — יש לתקן לפני אישור הטופס.")
+    broken = rules.record_problems(record)
+    if broken:
+        raise HTTPException(409, "אי אפשר לאשר את הטופס: " + " · ".join(w for why in broken.values() for w in why))
+    waiting = _waiting_help(record_id)
+    if waiting:
+        raise HTTPException(409, "יש שדות שנשלחו לעזרה וממתינים לתשובה: " + ", ".join(waiting))
 
     for field in record.fields.values():
         field.state = STATE_APPROVED
@@ -425,9 +572,12 @@ def saved_rows(
     """The approved rows of the chosen days, filtered."""
     filters = _filters(start, end, q, sender, received_from, received_to)
     try:
-        return db.list_rows(**filters, limit=max(0, min(limit, db.LIST_LIMIT)))
+        found = db.list_rows(**filters, limit=max(0, min(limit, db.LIST_LIMIT)))
     except ValueError as exc:
         raise HTTPException(400, "תאריך לא תקין.") from exc
+    for row in found["rows"]:
+        row["breaks_rules"] = rules.row_breaks_rules(row)  # אושר לפני הכללים — מסומן, לא נמחק ולא משתנה
+    return found
 
 
 @app.get("/api/saved/export")
@@ -491,6 +641,7 @@ def open_saved_form(form_key: str) -> dict:
         raise HTTPException(404, "הטופס לא נמצא.")
     batch, images = loaded
     for record in batch.records:
+        rules.reopen_broken(record)  # אושר לפני הכללים ואינו עומד בהם — חוזר לבדיקה, הערכים לא משתנים
         page = pipeline.page_image_path(batch.batch_id, record.source_index, record.page_number)
         kept = images.get(record.record_id)
         if not page.is_file() and kept and kept.is_file():
@@ -561,8 +712,12 @@ def update_record(record_id: str, payload: dict) -> dict:
     field = record.fields[key]
 
     if "values" in payload:
-        field.remember()
         values = [str(v).strip() for v in payload["values"] if str(v).strip()]
+        broken = rules.problems(key, values)
+        if broken:
+            # ערך שאינו עומד בכללים לא נשמר בכלל (החלטת נועה, 21/10/2026)
+            raise HTTPException(422, " · ".join(broken))
+        field.remember()
         if values != field.values and record.from_store:
             # טופס שהגיע מהמערכת ושונה — חייב "אישור הטופס" מחדש (החלטת נועה, 20/10/2026)
             record.verified = False
@@ -581,10 +736,16 @@ def update_record(record_id: str, payload: dict) -> dict:
     elif payload.get("approve"):
         if _has_unknown(field.values):
             raise HTTPException(409, f"ב{FIELDS_BY_KEY[key].label_he} יש תו שלא נקרא (?) — יש לתקן אותו לפני אישור.")
+        broken = rules.problems(key, field.values)
+        if broken:
+            raise HTTPException(409, "אי אפשר לאשר: " + " · ".join(broken))
+        if _waiting_help(record_id, key):
+            raise HTTPException(409, "השדה נשלח לעזרה וממתין לתשובה — אפשר לבטל את הבקשה ואז לאשר.")
         field.remember()
         field.state = STATE_APPROVED
         field.settle()
 
+    _decided(record_id, key)
     _changed(batch, record)
     return _serialise(batch)
 
@@ -668,6 +829,7 @@ def _require(batch_id: str) -> Batch:
 
 
 def _serialise(batch: Batch) -> dict:
+    helps = _help_of(batch)
     return {
         "batch_id": batch.batch_id,
         "display_name": batch.display_name,
@@ -732,6 +894,9 @@ def _serialise(batch: Batch) -> dict:
                         "crop_boxes": [list(padded(r)) if r else None for r in f.value_regions]
                         if len(f.value_regions) == len(f.values) and len(f.values) > 1 else [],
                         "can_undo": bool(f.history),
+                        # למה אי אפשר לאשר את הערך הזה (rules.py) — ריק כשאפשר
+                        "blocked": rules.problems(key, f.values),
+                        "help": _help_view(helps.get((r.record_id, key))),  # בקשת עזרה פעילה לשדה
                     }
                     for key, f in r.fields.items()
                 },

@@ -124,6 +124,21 @@ function isLtr(text){ return !/[֐-׿]/.test(String(text || '')); }
 const LTR_KEYS = ['national_id', 'central_numbers', 'sample_received_date', 'commitment_numbers'];
 // ערך עם "?" (תו שלא נקרא) — אי אפשר לאשר אותו, רק לתקן (גם השרת מסרב)
 function hasUnknown(f){ return !!f && f.values.some(function(v){ return v.indexOf('?') !== -1; }); }
+// ערך שאינו עומד בכללי המערכת (rules.py): אין ✓ בכלל — רק תיקון, או ריק ("חסר")
+function isBlocked(f){ return !!(f && f.blocked && f.blocked.length); }
+function canApprove(f){ return f.state !== 'approved' && !hasUnknown(f) && !isBlocked(f) && !helpWaiting(f); }
+// "🙋 עזרה": שדה כתום שעוד לא אושר, ושאין לו בקשה פעילה
+function helpWaiting(f){ return !!(f && f.help && f.help.status === 'open'); }
+function canAskHelp(r, f){ return !r.verified && !r.error && f.state === 'needs_review' && !f.help; }
+function whyOf(f){
+  const why = (f.blocked || []).map(function(b){ return '⛔ ' + b; });
+  // סיבות שהכלל כבר אומר במילים שלו — לא חוזרים עליהן
+  const same = why.length ? ['not_a_value', 'breaks_rule', 'unknown_char'] : [];
+  if (f.state === 'needs_review') f.reasons.forEach(function(x, i){
+    if (same.indexOf((f.reason_codes || [])[i]) === -1) why.push(x);
+  });
+  return why.join(' · ');
+}
 function bdiText(v){ return '<bdi dir="' + (v && isLtr(v) ? 'ltr' : 'auto') + '">' + esc(v || '—') + '</bdi>'; }
 function valueHtml(f){
   if (f.values.length) {
@@ -447,7 +462,7 @@ function visibleRecords(){
 function signature(d){
   return JSON.stringify(d.records.map(function(r){
     return [r.record_id, r.verified, FIELDS.map(function(f){
-      const x = r.fields[f.key]; return [x.state, x.values, x.reasons];
+      const x = r.fields[f.key]; return [x.state, x.values, x.reasons, x.help && x.help.status];
     })];
   }));
 }
@@ -608,9 +623,9 @@ function renderTable(){
 function cell(r, spec){
   const f = r.fields[spec.key];
   const cls = f.state === 'needs_review' ? 'review' : f.state === 'approved' ? 'approved' : '';
-  const why = f.state === 'needs_review' && f.reasons.length ? f.reasons.join(' · ') : '';
+  const why = whyOf(f);
   const mini = '<span class="mini">' +
-    (f.state !== 'approved' && !hasUnknown(f) ? '<button class="ok" data-act="approve" tabindex="-1" title="' +
+    (canApprove(f) ? '<button class="ok" data-act="approve" tabindex="-1" title="' +
       (f.values.length ? 'אשר' : 'אשר כריק') + '" aria-label="אשר">✓</button>' : '') +
     '<button data-act="edit" tabindex="-1" title="תקן" aria-label="תקן">✎</button></span>';
   return '<td class="cell ' + cls + '" tabindex="0" data-key="' + spec.key + '" data-rec="' + r.record_id +
@@ -719,6 +734,11 @@ pop.addEventListener('click', function(e){
   if (b.dataset.act === 'approve') approveField(td.dataset.rec, td.dataset.key);
   if (b.dataset.act === 'edit') { closePop(); edit(td); }
   if (b.dataset.act === 'open') { closePop(); openRecord(td.dataset.rec); }
+  if (b.dataset.act === 'help' || b.dataset.help) {
+    const r = recordById(td.dataset.rec);
+    closePop();
+    if (r) helpAction(b.dataset.help || 'ask', r, td.dataset.key, null);
+  }
   if (b.dataset.act === 'zoom') { const r = recordById(td.dataset.rec); closePop(); if (r) openPageZoom(td, r, FIELDS[0].key); }
 });
 
@@ -757,9 +777,11 @@ function openPop(td){
     (isName(key) ? NAME_KEYS.map(function(k){
         return '<div class="val nm' + (k === key ? ' now' : '') + '"><span>' + esc(fieldLabel(k)) + ':</span> ' + valueHtml(r.fields[k]) + '</div>';
       }).join('') : '<div class="val">' + valueHtml(f) + '</div>') +
-    (f.state === 'needs_review' && f.reasons.length ? '<div class="why">' + esc(f.reasons.join(' · ')) + '</div>' : '') +
+    (whyOf(f) ? '<div class="why">' + esc(whyOf(f)) + '</div>' : '') +
+    helpStrip(f, key) +
     '<div class="btns"><button class="secondary" data-act="open">פתיחת הטופס</button>' +
-    (f.state !== 'approved' && !hasUnknown(f) ? '<button class="primary" data-act="approve">✓ ' + (f.values.length ? 'אשר' : 'אשר כריק') + '</button>' : '') +
+    (canAskHelp(r, f) ? '<button class="secondary" data-act="help">🙋 עזרה</button>' : '') +
+    (canApprove(f) ? '<button class="primary" data-act="approve">✓ ' + (f.values.length ? 'אשר' : 'אשר כריק') + '</button>' : '') +
     '<button data-act="edit">✎ תקן</button></div>';
   pop.classList.remove('hidden');
   popFor = td;
@@ -1186,15 +1208,15 @@ function renderForm(){
   $('#fvCards').innerHTML = FIELDS.map(function(spec, i){
     const f = r.fields[spec.key];
     const cls = f.state === 'needs_review' ? 'review' : f.state === 'approved' ? 'approved' : '';
-    const why = f.state === 'needs_review' && f.reasons.length ? f.reasons.join(' · ') : '';
+    const why = whyOf(f);
     return '<div class="fcard ' + cls + (i === cardIndex ? ' now' : '') + '" role="listitem" tabindex="0" data-i="' + i +
       '" data-key="' + spec.key + '"' + (why ? ' title="' + esc(why) + '"' : '') +
       ' aria-label="' + esc(spec.label) + ': ' + esc(f.values.join(' | ') || 'ריק') +
       (cls === 'review' ? ', לבדיקה' + (why ? ': ' + esc(why) : '') : cls === 'approved' ? ', אושר' : '') + '">' +
-      '<span class="lbl">' + esc(spec.label) + '</span>' +
+      '<span class="lbl">' + esc(spec.label) + helpMark(f) + '</span>' +
       '<span class="val">' + valueHtml(f) + '</span>' +
       '<span class="btns">' +
-        (f.state !== 'approved' && !hasUnknown(f) ? '<button class="ok" data-act="approve" title="' + (f.values.length ? 'אשר' : 'אשר כריק') +
+        (canApprove(f) ? '<button class="ok" data-act="approve" title="' + (f.values.length ? 'אשר' : 'אשר כריק') +
           '" aria-label="אשר">✓</button>' : '') +
         '<button data-act="edit" title="תקן" aria-label="תקן">✎</button></span>' +
       '</div>';
@@ -1540,18 +1562,20 @@ function renderZoom(force){
   const keys = isName(spec.key) ? NAME_KEYS : [spec.key];
   const deg = viewTurn[r.record_id] || 0;
   const sig = [r.record_id, spec.key, inkView, deg].concat(keys.map(function(k){
-    return r.fields[k].state + r.fields[k].values.join('|');
+    return r.fields[k].state + r.fields[k].values.join('|') + (r.fields[k].help ? r.fields[k].help.status : '');
   })).join('~');
   if (!force && sig === zoomShown) return;
   zoomShown = sig;
-  const why = f.state === 'needs_review' && f.reasons.length ? f.reasons.join(' · ') : '';
+  const why = whyOf(f);
   const tag = f.state === 'needs_review' ? '<span class="badge review">לבדיקה</span>'
             : f.state === 'approved' ? '<span class="badge ok">✓ אושר</span>' : '';
   const title = isName(spec.key) ? 'שם פרטי ושם משפחה' : spec.label;
   panel.innerHTML =
     '<div class="zhead"><h3>' + esc(title) + '</h3>' + tag + '<span class="grow"></span>' +
+      (canAskHelp(r, f) ? '<button class="secondary helpbtn" data-help="ask" title="מתלבטת? לשאול ממונה — בהודעה אין פרטי מטופל">🙋 עזרה</button>' : '') +
       '<button class="closebtn" data-zoomclose="1" aria-label="סגירת התקריב" title="סגירה (Esc)">✕</button></div>' +
     (why ? '<p class="zwhy">' + esc(why) + '</p>' : '') +
+    helpStrip(f, spec.key) +
     zoomCrops(r, spec.key) +
     '<div class="zval">' + keys.map(function(k){
       return '<div class="zrow' + (k === spec.key && keys.length > 1 ? ' now' : '') + '"><span>' +
@@ -1706,6 +1730,9 @@ function closeZoom(){
 }
 $('#fvZoom').addEventListener('click', function(e){
   if (e.target.closest('[data-zoomclose]')) closeZoom();
+  const h = e.target.closest('[data-help]');
+  const r = currentRecord();
+  if (h && r) helpAction(h.dataset.help, r, FIELDS[cardIndex].key, h);
 });
 
 function focusCard(i, noScroll){
@@ -1832,21 +1859,31 @@ function edit(td){
   input.select();
   let closed = false;
   // סוגרים את תיבת העריכה לפני שמירה וציור — אחרת המסך "חושב" שעדיין מקלידים
-  const finish = function(saveIt){
+  const finish = function(saveIt, again){
     if (closed) return;
     closed = true;
     if (activeEditor && activeEditor.input === input) activeEditor = null;
     const text = input.value;
     input.remove();
-    if (saveIt) saveValues(rec, key, splitValues(text), raw);
+    // Enter על ערך שהשרת דחה (rules.py) — העורך נפתח שוב עם מה שהוקלד, לא נאבד
+    if (saveIt) saveValues(rec, key, splitValues(text), raw, false, again ? function(){ reopenCell(rec, key, text); } : null);
     else { lastSignature = ''; render(last, true); }
   };
   activeEditor = { input: input, cancel: function(){ closed = true; input.remove(); } };
   input.onblur = function(){ finish(true); };
   input.onkeydown = function(e){
-    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Enter') { e.preventDefault(); finish(true, true); }
     if (e.key === 'Escape') { e.preventDefault(); finish(false); }
   };
+}
+function reopenCell(rec, key, text){
+  lastSignature = '';
+  render(last, true);
+  const td = document.querySelector('td.cell[data-rec="' + rec + '"][data-key="' + key + '"]');
+  if (!td) return;
+  edit(td);
+  const input = td.querySelector('input');
+  if (input) { input.value = text; input.setAttribute('aria-invalid', 'true'); }
 }
 
 function editCard(card){
@@ -1878,22 +1915,31 @@ function editCard(card){
   input.select();
   let closed = false;
   // סוגרים את תיבת העריכה לפני שמירה וציור — אחרת המסך "חושב" שעדיין מקלידים
-  const finish = function(saveIt){
+  const finish = function(saveIt, again){
     if (closed) return;
     closed = true;
     if (activeEditor && activeEditor.input === input) activeEditor = null;
     const text = input.value;
     box.remove();
-    if (saveIt) saveValues(r.record_id, key, splitValues(text), raw, true);
+    if (saveIt) saveValues(r.record_id, key, splitValues(text), raw, true, again ? function(){ reopenCard(key, text); } : null);
     else { lastSignature = ''; render(last, true); focusCard(cardIndex); }
   };
   activeEditor = { input: input, cancel: function(){ closed = true; box.remove(); } };
   input.onkeydown = function(e){
     e.stopPropagation();
-    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Enter') { e.preventDefault(); finish(true, true); }
     if (e.key === 'Escape') { e.preventDefault(); finish(false); }
   };
   input.onblur = function(){ finish(true); };
+}
+function reopenCard(key, text){
+  lastSignature = '';
+  render(last, true);
+  const card = document.querySelector('#fvCards .fcard[data-key="' + key + '"]');
+  if (!card) return;
+  editCard(card);
+  const input = card.querySelector('input');
+  if (input) { input.value = text; input.setAttribute('aria-invalid', 'true'); }
 }
 
 function splitValues(text){
@@ -1921,9 +1967,11 @@ async function patch(recordId, body){
     method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(Object.assign({ version: versionOf(recordId) }, body))
   });
+  lastRefused = res.ok ? 0 : res.status;
   if (!res.ok) { await refuseStale(res); return null; }
   return res.json();
 }
+let lastRefused = 0;  // 422 = הערך אינו עומד בכללי המערכת (rules.py)
 
 async function approveField(recordId, key, fromCard){
   const d = await patch(recordId, { field: key, approve: true });
@@ -1935,10 +1983,13 @@ async function approveField(recordId, key, fromCard){
   if (fromCard || view === 'form') advanceCard();
 }
 
-async function saveValues(recordId, key, values, before, fromCard){
+async function saveValues(recordId, key, values, before, fromCard, again){
   if (values.join(' | ') === before) { lastSignature = ''; render(last, true); return; }
   const d = await patch(recordId, { field: key, values: values });
-  if (!d) return;
+  if (!d) {
+    if (again && lastRefused === 422) again(); else { lastSignature = ''; render(last, true); }
+    return;
+  }
   lastSignature = '';
   render(d, true);
   toast('✎ ' + fieldLabel(key) + ' עודכן', { undo: function(){ undo(recordId, key); } });
@@ -1988,6 +2039,7 @@ document.addEventListener('keydown', function(e){
   if (!$('#rrConfirm').classList.contains('hidden')) return rereadKeys(e);
   if (!$('#joinPick').classList.contains('hidden')) return joinPickKeys(e);
   if (!$('#splitPick').classList.contains('hidden')) return splitPickKeys(e);
+  if (!$('#helpAsk').classList.contains('hidden')) return helpAskKeys(e);
   if (!$('#delConfirm').classList.contains('hidden')) return deleteKeys(e);
   if (!$('#storeConfirm').classList.contains('hidden')) return storedKeys(e);
   if (e.key === 'Escape') { closePop(); if (!$('#tour').classList.contains('hidden')) closeTour(); }
@@ -2353,12 +2405,13 @@ function renderRecords(d){
     const rep = function(v, extra){ return '<td class="rep' + (extra ? ' ' + extra : '') + '">' + bdiText(v) + '</td>'; };
     const dupes = row.duplicates || [];
     const dup = dupes.length ? '<span class="badge dup" title="' + esc(dupTitle(dupes)) + '">⧉ ייתכן כפול</span>' : '';
+    const rule = row.breaks_rules ? '<span class="badge rulebad" title="אושר לפני שנוספו כללי המערכת ואינו עומד בהם (למשל שתי ת&quot;ז). לא נמחק ולא שונה — בפתיחה, השדה יסומן לתיקון.">⚠ לא עומד בכללים</span>' : '';
     const old = row.can_open ? '' : '<span class="oldtag" title="אושר לפני שנוספה השמירה המלאה — לצפייה ולייצוא בלבד">לצפייה</span>';
     return '<tr class="' + cls + '" tabindex="0" data-key="' + esc(row.form_key) + '" data-open="' + (row.can_open ? 1 : 0) + '"' +
       ' aria-label="' + (row.can_open ? 'פתיחת הטופס לבדיקה' : 'טופס ישן — לצפייה בלבד') + '">' +
       rep(row.first_name) + rep(row.last_name) + rep(row.national_id, 'num') + rep(row.central_numbers, 'num') +
       rep(row.sample_received_date) + rep(row.sending_entity) +
-      '<td class="num">' + bdiText(row.commitment_number) + dup + '</td>' +
+      '<td class="num">' + bdiText(row.commitment_number) + dup + rule + '</td>' +
       '<td class="src" title="' + esc(row.source_name) + '"><bdi>' + esc(row.source_name) + '</bdi> · עמ׳ ' + row.page_number + old + '</td>' +
       '<td class="when">' + esc(localTime(row.approved_at)) + '</td>' +
       '<td class="acts">' + (first ? '<button class="delbtn" data-del="' + esc(row.form_key) +
@@ -2698,3 +2751,294 @@ $('#tourNext').onclick = function(){ if (tourStep < TOUR.length - 1) { tourStep 
 $('#tourSkip').onclick = closeTour;
 $('#helpBtn').onclick = openTour;
 $('#tour').addEventListener('click', function(e){ if (e.target.id === 'tour') closeTour(); });
+
+/* ------------------------------------------------------------ 🙋 עזרה: שאלה לממונה (החלטת נועה, 21/10/2026)
+   המזכירה מתלבטת בשדה כתום → שולחת קישור בוואטסאפ או במייל. בהודעה עצמה אין פרטי מטופל — רק
+   הקישור; מי שפותח אותו רואה את התקריב של השדה הזה בלבד ועונה. השדה לא מאושר עד שמגיעה תשובה
+   (או שהיא מבטלת את הבקשה), וההחלטה נשארת אצלה. בחינם — בלי מודל. */
+function helpMark(f){
+  if (!f.help) return '';
+  return f.help.status === 'open' ? ' <span class="helpmark" title="נשלח לעזרה — ממתין לתשובה">⏳</span>'
+    : ' <span class="helpmark got" title="התקבלה תשובה">💬</span>';
+}
+
+function helpStrip(f, key){
+  const h = f.help;
+  if (!h) return '';
+  if (h.status === 'open' && h.expired) {
+    return '<div class="zhelp wait" role="status"><span>⌛ <b>הקישור פג תוקף</b> (48 שעות) ולא התקבלה תשובה. אפשר לשלוח קישור חדש.</span>' +
+      '<span class="zhelpbtns"><button class="secondary" data-help="share">שליחה שוב</button>' +
+      '<button class="secondary" data-help="cancel">ביטול הבקשה</button></span></div>';
+  }
+  if (h.status === 'open') {
+    return '<div class="zhelp wait" role="status"><span>⏳ <b>נשלח לעזרה</b> — ממתין לתשובה. עד אז השדה לא יאושר.</span>' +
+      '<span class="zhelpbtns"><button class="secondary" data-help="share">שליחה שוב</button>' +
+      '<button class="secondary" data-help="cancel">ביטול הבקשה</button></span></div>';
+  }
+  const ltr = LTR_KEYS.indexOf(key) !== -1 ? 'ltr' : 'rtl';
+  return '<div class="zhelp got" role="status"><span>💬 <b>' + esc(h.answered_by || 'התקבלה תשובה') + ':</b> ' +
+    (h.answer_value ? '<bdi dir="' + ltr + '" class="hv">' + esc(h.answer_value) + '</bdi>' : '') +
+    (h.answer_note ? (h.answer_value ? ' · ' : '') + esc(h.answer_note) : '') + '</span>' +
+    (h.answer_value ? '<span class="zhelpbtns"><button class="primary" data-help="use">✓ להשתמש בערך הזה</button></span>' : '') +
+    '<small class="zhelpnote">ההחלטה שלך: אפשר להשתמש בערך, לתקן בעצמך, או לאשר את מה שיש.</small></div>';
+}
+
+let haFor = null, haOpener = null;
+
+async function helpAction(act, r, key, opener){
+  const f = r.fields[key];
+  if (act === 'ask' || act === 'share') return openHelpAsk(r, key, opener);
+  if (act === 'cancel') {
+    const res = await fetch('/api/records/' + r.record_id + '/help/cancel', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ field: key })
+    });
+    if (!res.ok) return refuseStale(res);
+    lastSignature = '';
+    render(await res.json(), true);
+    toast('הבקשה בוטלה — אפשר לתקן או לאשר את השדה');
+  }
+  if (act === 'use' && f.help && f.help.answer_value) {
+    saveValues(r.record_id, key, [f.help.answer_value], f.values.join(' | '), view === 'form');
+  }
+}
+
+function openHelpAsk(r, key, opener){
+  const f = r.fields[key];
+  haFor = { record_id: r.record_id, key: key };
+  haOpener = opener || document.activeElement;
+  $('#haTitle').textContent = '🙋 בקשת עזרה — ' + fieldLabel(key);
+  const crops = (f.crop_boxes || []).length
+    ? f.crop_boxes.map(function(b, i){ return b ? '<img alt="תקריב של ' + esc(f.values[i]) + '" src="' + cropUrl(r, key, i) + '">' : ''; }).join('')
+    : f.crop_box ? '<img alt="תקריב של ' + esc(fieldLabel(key)) + '" src="' + cropUrl(r, key) + '">' : '';
+  $('#haCrops').innerHTML = crops || '<p class="sub">אין תקריב לשדה הזה — הממונה יראה רק את השאלה והערכים.</p>';
+  $('#haValues').innerHTML = f.values.length
+    ? 'הממונה יראה את ' + (f.values.length > 1 ? 'הערכים' : 'הערך') + ': ' + f.values.map(function(v){
+        return '<b><bdi dir="' + (LTR_KEYS.indexOf(key) !== -1 ? 'ltr' : 'rtl') + '">' + esc(v) + '</bdi></b>';
+      }).join(' · ')
+    : 'השדה ריק — הממונה יתבקש לכתוב את הערך.';
+  const sent = !!f.help;
+  $('#haQuestion').value = sent ? (f.help.question || '') : (f.values.length > 1 ? 'איזה מהערכים נכון?' : 'מה כתוב כאן?');
+  $('#haQuestion').disabled = sent;
+  $('#haAsker').disabled = sent;
+  try { $('#haAsker').value = sent ? (f.help.asker || '') : (localStorage.getItem('helpAsker') || ''); } catch (e) {}
+  $('#haLocal').classList.toggle('hidden', !/^(localhost|127\.|\[::1\])/.test(location.hostname));
+  helpStep(false);
+  fillRecent('haToList', 'helpTo', $('#haTo'));
+  fillRecent('haPhoneList', 'helpPhone', $('#haPhone'));
+  $('#helpAsk').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  (sent ? $('#haPick .hachan') : $('#haQuestion')).focus();
+}
+
+function closeHelpAsk(){
+  $('#helpAsk').classList.add('hidden');
+  document.body.style.overflow = '';
+  haFor = null;
+  if (haOpener && document.body.contains(haOpener)) haOpener.focus();
+}
+
+// יוצר את הבקשה (פעם אחת לשדה) ומחזיר את הקישור; שליחה שוב — אותו קישור
+async function helpLink(){
+  const r = recordById(haFor.record_id);
+  const f = r && r.fields[haFor.key];
+  if (!f) return null;
+  if (f.help && !f.help.expired) return location.origin + '/help/' + encodeURIComponent(f.help.token);
+  const asker = $('#haAsker').value.trim();
+  try { localStorage.setItem('helpAsker', asker); } catch (e) {}
+  const res = await fetch('/api/records/' + haFor.record_id + '/help', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ field: haFor.key, question: $('#haQuestion').value.trim(), asker: asker })
+  });
+  if (!res.ok) { await refuseStale(res); return null; }
+  const d = await res.json();
+  lastSignature = '';
+  render(d, true);
+  return location.origin + '/help/' + encodeURIComponent(d.help_token);
+}
+
+// ההודעה עצמה: מי שואלת, על איזה שדה ומה השאלה, וקישור. בלי ערכים, בלי שם מטופל, בלי ת"ז —
+// אלה מוצגים רק בקישור. טקסט בלבד: קישורי Gmail / Outlook / וואטסאפ לא מעבירים תמונה או עיצוב.
+// וואטסאפ מציג *כך* כמודגש.
+function helpMessage(url, forWhatsapp){
+  const asker = $('#haAsker').value.trim();
+  const question = $('#haQuestion').value.trim();
+  const b = function(text){ return forWhatsapp ? '*' + text + '*' : text; };
+  return [
+    'שלום,',
+    '',
+    (asker || 'המזכירה') + ' מבקשת את עזרתך בבדיקת טופס התחייבות.',
+    '',
+    b('השדה:') + ' ' + fieldLabel(haFor.key),
+    question ? b('השאלה:') + ' ' + question : '',
+    '',
+    'לצפייה בתקריב ולתשובה בלחיצה אחת:',
+    url,
+    'התשובה נכנסת ישר למערכת. הקישור בתוקף 48 שעות.',
+    '',
+    'מטעמי פרטיות, פרטי המטופל מוצגים רק בקישור — לא בהודעה.',
+    '',
+    'תודה,',
+    'מערכת קליטת טפסי התחייבות · המעבדה המרכזית לנגיפים',
+  ].filter(function(line, i, all){ return line !== '' || all[i - 1] !== ''; }).join('\n');
+}
+function helpSubject(){
+  return HELP_SUBJECT + ' — שדה "' + fieldLabel(haFor.key) + '"';
+}
+
+const HELP_SUBJECT = 'בקשת עזרה בבדיקת טופס';
+const HELP_PANES = { mail: '#haPaneMail', wa: '#haPaneWa', link: '#haPaneLink' };
+
+// קודם בוחרים דרך (מייל / וואטסאפ / קישור), ואז רואים רק את המסך שלה. null = חזרה לבחירה
+function helpPane(name){
+  $('#haPick').classList.toggle('hidden', !!name);
+  Object.keys(HELP_PANES).forEach(function(k){ $(HELP_PANES[k]).classList.toggle('hidden', k !== name); });
+  $('#haErr').classList.add('hidden');
+  if (!$('#helpAsk').classList.contains('hidden')) {
+    const first = name ? $(HELP_PANES[name]).querySelector('input, .primary') : $('#haPick .hachan');
+    if (first) first.focus();
+  }
+}
+function helpPaneOpen(){
+  return Object.keys(HELP_PANES).some(function(k){ return !$(HELP_PANES[k]).classList.contains('hidden'); });
+}
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// הנמענים האחרונים — נשמרים רק בדפדפן הזה, לבחירה מהירה בפעם הבאה
+function recent(key){
+  try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { return []; }
+}
+function remember5(key, value){
+  if (!value) return;
+  const list = [value].concat(recent(key).filter(function(x){ return x !== value; })).slice(0, 5);
+  try { localStorage.setItem(key, JSON.stringify(list)); } catch (e) {}
+}
+function fillRecent(listId, key, input){
+  const list = recent(key);
+  $('#' + listId).innerHTML = list.map(function(v){ return '<option value="' + esc(v) + '">'; }).join('');
+  if (!input.value) input.value = list[0] || '';
+}
+
+// נייד ישראלי → המספר הבינלאומי שוואטסאפ צריך: 050-1234567 → 972501234567
+function waNumber(text){
+  let digits = (text || '').replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.startsWith('0')) digits = '972' + digits.slice(1);
+  return digits.length >= 9 ? digits : '';
+}
+
+function helpError(text, focus){
+  $('#haErr').textContent = text;
+  $('#haErr').classList.remove('hidden');
+  if (focus) focus.focus();
+}
+
+// שלב אחרי השליחה: אותו חלון, עם מה שקרה ומה נשאר לעשות
+function helpStep(done, text, alt){
+  $('#haForm').classList.toggle('hidden', !!done);
+  $('#haDone').classList.toggle('hidden', !done);
+  $('#haCancel').classList.toggle('hidden', !!done);
+  $('#haAgain').classList.toggle('hidden', !done);
+  $('#haFinish').classList.toggle('hidden', !done);
+  $('#haErr').classList.add('hidden');
+  if (!done) return helpPane(null);
+  $('#haDoneText').innerHTML = text;
+  $('#haDoneAlt').innerHTML = alt || '';
+  $('#haFinish').focus();
+}
+
+async function helpSend(channel){
+  if (!haFor) return;
+  $('#haErr').classList.add('hidden');
+  const to = $('#haTo').value.trim();
+  const phone = waNumber($('#haPhone').value);
+  const byMail = channel === 'gmail' || channel === 'outlook' || channel === 'mail';
+  if (byMail && !EMAIL_RE.test(to)) return helpError('כתבי למי לשלוח — כתובת המייל של הממונה.', $('#haTo'));
+  if (channel === 'whatsapp' && $('#haPhone').value.trim() && !phone) return helpError('מספר הנייד לא נראה תקין.', $('#haPhone'));
+  const btn = { gmail: $('#haGmail'), outlook: $('#haOutlook'), mail: $('#haMail'), whatsapp: $('#haWhatsapp'), copy: $('#haCopy') }[channel];
+  btn.disabled = true;
+  const url = await helpLink();
+  btn.disabled = false;
+  if (!url) return;
+  const text = helpMessage(url);
+  const subject = encodeURIComponent(helpSubject()), body = encodeURIComponent(text), toq = encodeURIComponent(to);
+  const target = {
+    gmail: 'https://mail.google.com/mail/?view=cm&fs=1&to=' + toq + '&su=' + subject + '&body=' + body,
+    outlook: 'https://outlook.office.com/mail/deeplink/compose?to=' + toq + '&subject=' + subject + '&body=' + body,
+    mail: 'mailto:' + to + '?subject=' + subject + '&body=' + body,
+    whatsapp: 'https://wa.me/' + phone + '?text=' + encodeURIComponent(helpMessage(url, true)),
+  }[channel];
+  if (byMail) remember5('helpTo', to);
+  if (channel === 'whatsapp' && phone) remember5('helpPhone', $('#haPhone').value.trim());
+  // אם הדפדפן חסם את הלשונית — אותו קישור מופיע בחלון, ללחיצה
+  const again = target ? ' <a href="' + esc(target) + '" target="_blank" rel="noopener">לא נפתח? לחצי כאן</a>' : '';
+  if (channel === 'copy') {
+    let copied = true;
+    try { await navigator.clipboard.writeText(url); } catch (e) { copied = false; }
+    helpStep(true, copied ? '✓ <b>הקישור הועתק.</b> הדביקי אותו בהודעה לממונה (Ctrl+V).'
+      : '<b>העתיקי את הקישור:</b>', '<input class="halink" readonly dir="ltr" value="' + esc(url) + '" onclick="this.select()">');
+    return;
+  }
+  if (channel === 'mail') {
+    const a = document.createElement('a');
+    a.href = target;
+    a.click();
+    helpStep(true, '✓ <b>ביקשנו מהמחשב לפתוח את תוכנת המייל</b> עם הודעה אל <bdi dir="ltr">' + esc(to) + '</bdi>. לחצי שם "שליחה".',
+      'לא נפתחה תוכנה? כנראה שאין תוכנת מייל מוגדרת במחשב — חזרי ובחרי Gmail או Outlook.');
+  } else {
+    window.open(target, '_blank', 'noopener');
+    const where = channel === 'gmail' ? 'ב-Gmail' : channel === 'outlook' ? 'ב-Outlook' : 'בוואטסאפ';
+    const who = byMail ? 'מייל אל <bdi dir="ltr">' + esc(to) + '</bdi>' :
+      phone ? 'צ\'אט עם <bdi dir="ltr">' + esc($('#haPhone').value.trim()) + '</bdi>' : 'וואטסאפ — בחרי שם את איש הקשר';
+    helpStep(true, '✓ <b>נפתח ' + who + '</b> ' + where + ', בלשונית חדשה. ההודעה כבר כתובה — עברי ללשונית ולחצי "שליחה".', again);
+  }
+  toast('🙋 נשלח לעזרה — השדה ממתין לתשובה');
+}
+
+function helpAskKeys(e){
+  if (e.key === 'Escape') { e.preventDefault(); return helpPaneOpen() ? helpPane(null) : closeHelpAsk(); }
+  const tiles = $$('#haPick .hachan'), at = tiles.indexOf(document.activeElement);
+  if (at !== -1 && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].indexOf(e.key) !== -1) {
+    e.preventDefault();
+    // RTL: חץ שמאלה = הבא
+    const step = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? 1 : -1;
+    return tiles[(at + step + tiles.length) % tiles.length].focus();
+  }
+  if (e.key === 'Tab') {
+    const stops = $$('#helpAsk textarea:not(:disabled), #helpAsk input:not(:disabled), #helpAsk button:not(:disabled), #helpAsk a')
+      .filter(function(x){ return x.offsetParent !== null; });
+    const at = stops.indexOf(document.activeElement);
+    e.preventDefault();
+    stops[(at + (e.shiftKey ? stops.length - 1 : 1) + stops.length) % stops.length].focus();
+  }
+}
+$('#haCancel').onclick = closeHelpAsk;
+$('#haWhatsapp').onclick = function(){ helpSend('whatsapp'); };
+$('#haMail').onclick = function(){ helpSend('mail'); };
+$('#haGmail').onclick = function(){ helpSend('gmail'); };
+$('#haOutlook').onclick = function(){ helpSend('outlook'); };
+$('#haFinish').onclick = closeHelpAsk;
+$('#haAgain').onclick = function(){ helpStep(false); };
+$$('#helpAsk [data-pane]').forEach(function(b){ b.onclick = function(){ helpPane(b.dataset.pane || null); }; });
+$('#haCopy').onclick = function(){ helpSend('copy'); };
+$('#helpAsk').addEventListener('click', function(e){ if (e.target.id === 'helpAsk') closeHelpAsk(); });
+
+// כשיש שדה שממתין לתשובה — בודקים כל כמה שניות אם ענו. בלי מודל ובלי עלות.
+let helpWatching = {};
+setInterval(async function(){
+  if (!last || !batch || processing || document.hidden) return;
+  const waiting = last.records.some(function(r){ return FIELDS.some(function(s){ return helpWaiting(r.fields[s.key]); }); });
+  if (!waiting) return;
+  const res = await fetch('/api/batches/' + batch).catch(function(){ return null; });
+  if (!res || !res.ok) return;
+  const d = await res.json();
+  d.records.forEach(function(r){
+    FIELDS.forEach(function(s){
+      const before = recordById(r.record_id), h = r.fields[s.key].help;
+      const was = before && before.fields[s.key].help;
+      if (was && was.status === 'open' && h && h.status === 'answered') {
+        toast('💬 התקבלה תשובה בשדה ' + s.label + (h.answered_by ? ' · ' + h.answered_by : ''));
+      }
+    });
+  });
+  render(d);
+}, 5000);

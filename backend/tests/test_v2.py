@@ -145,7 +145,7 @@ def test_differences_that_are_not_differences_still_agree(key, a, b):
 
 def test_normalization_never_changes_a_digit():
     assert normalize("national_id", "0012") == "0012"
-    assert normalize("national_id", "001122344") != normalize("national_id", "001122334")
+    assert normalize("national_id", "011223344") != normalize("national_id", "001122334")
 
 
 def test_sender_is_shown_by_its_canonical_name():
@@ -342,7 +342,7 @@ def api(tmp_path, monkeypatch):
     page.parent.mkdir(parents=True, exist_ok=True)
     png(page, size=(1000, 1400))
     record = record_from(
-        reading("a", regions={"national_id": (0.4, 0.4, 0.6, 0.45)}, national_id=["001122344"],
+        reading("a", regions={"national_id": (0.4, 0.4, 0.6, 0.45)}, national_id=["011223344"],
                 commitment_numbers=["730578626"]),
         reading("b", national_id=["00112?344"], commitment_numbers=["730578626"]),
     )
@@ -358,9 +358,9 @@ def test_api_serves_values_and_crop_box(api):
     client, record = api
     data = client.get("/api/batches/bat_api").json()
     field = data["records"][0]["fields"]["national_id"]
-    assert field["values"] == ["001122344"]
+    assert field["values"] == ["011223344"]
     assert field["crop_box"] is not None
-    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "crop_boxes", "region_note", "can_undo"}
+    assert set(field) == {"values", "state", "reasons", "reason_codes", "crop_box", "crop_boxes", "region_note", "can_undo", "blocked", "help"}
 
 
 def test_api_crop_endpoint(api):
@@ -392,7 +392,7 @@ def test_verify_is_refused_while_a_field_is_orange(api):
 
 def test_verify_saves_an_answer_key_entry(api, tmp_path):
     client, record = api
-    client.patch(f"/api/records/{record.record_id}", json={"field": "national_id", "values": ["001122344"]})
+    client.patch(f"/api/records/{record.record_id}", json={"field": "national_id", "values": ["011223344"]})
     _approve_open_fields(client, record)
     res = client.post(f"/api/records/{record.record_id}/verify")
     assert res.status_code == 200
@@ -400,7 +400,7 @@ def test_verify_saves_an_answer_key_entry(api, tmp_path):
 
     forms = gold.load_all(tmp_path / "gold")
     assert len(forms) == 1
-    assert forms[0].truth["national_id"] == ["001122344"]
+    assert forms[0].truth["national_id"] == ["011223344"]
     assert forms[0].page_png.is_file()
 
 
