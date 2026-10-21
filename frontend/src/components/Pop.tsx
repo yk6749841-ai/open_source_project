@@ -96,7 +96,7 @@ function CellContent({ r, fieldKey, onLoad }: { r: Rec; fieldKey: string; onLoad
       {why ? <div className="why">{why}</div> : null}
       <HelpStrip f={f} fieldKey={fieldKey} />
       <div className="btns"><Btn className="secondary" data-act="open" onClick={() => { closePop(); openRecord(r.record_id); }}>פתיחת הטופס</Btn>
-        {canAskHelp(r, f) ? <Btn className="secondary" data-act="help" onClick={() => { closePop(); helpAction('ask', r, fieldKey, null); }}>🙋 עזרה</Btn> : null}
+        {!S.processing && canAskHelp(r, f) ? <Btn className="secondary" data-act="help" onClick={() => { closePop(); helpAction('ask', r, fieldKey, null); }}>🙋 עזרה</Btn> : null}
         {canApprove(f) ? <Btn className="primary" data-act="approve" onClick={() => approveField(r.record_id, fieldKey)}>✓ {f.values.length ? 'אשר' : 'אשר כריק'}</Btn> : null}
         <Btn data-act="edit" onClick={() => { closePop(); startEdit('cell', r.record_id, fieldKey); }}>✎ תקן</Btn></div>
     </>

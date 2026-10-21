@@ -470,6 +470,10 @@ def verify_record(record_id: str, payload: dict | None = None) -> dict:
     if found is None:
         raise HTTPException(404, "הרשומה לא נמצאה.")
     batch, record = found
+    if batch.status in ("queued", "processing"):
+        # טפסים מוצגים כבר בזמן הקריאה (אפשר לעיין ולתקן), אבל חיבור החצאים וזיהוי טפסים מהמערכת
+        # רצים רק בסוף — לכן מאשרים טופס רק אחרי שהם הסתיימו
+        raise HTTPException(409, "הקריאה עוד נמשכת — אפשר לעיין ולתקן, ואת הטופס מאשרים בסיום.")
     _check_version(record, payload)
     still_open = [FIELDS_BY_KEY[k].label_he for k, f in record.fields.items() if f.state == STATE_REVIEW]
     if still_open:
@@ -893,6 +897,8 @@ def _serialise(batch: Batch) -> dict:
                 "verified": r.verified,
                 "straightened": r.straightened,
                 "joined": r.record_id in batch.joined,  # חובר משני חצאים — אפשר להפריד
+                # החלקים שמהם נוצר — מי שצפתה בחלק בזמן הקריאה עוברת לטופס המחובר, לא לטופס אחר
+                "joined_from": [part.record_id for part in batch.joined.get(r.record_id, [])],
                 "split_from_joined": r.record_id in batch.split_pairs,  # אפשר "חבר בחזרה"
                 "can_join": halves.is_partial(batch, r),  # חלק של טופס חתוך — אפשר לחבר ידנית
                 "version": r.version,

@@ -64,7 +64,9 @@ export function FormView() {
         <SplitButton r={r} />
         <Btn className="iconbtn" id="prevForm" aria-label="הטופס הקודם" title="הטופס הקודם" disabled={!r || S.formIndex === 0}
           onClick={() => goForm(-1)}>→</Btn>
-        <Btn className="iconbtn" id="nextForm" aria-label="הטופס הבא" title="הטופס הבא" disabled={!r || S.formIndex >= list.length - 1}
+        <Btn className="iconbtn" id="nextForm" aria-label="הטופס הבא"
+          title={S.processing && r && S.formIndex >= list.length - 1 ? 'הטופס הבא עוד נקרא…' : 'הטופס הבא'}
+          disabled={!r || S.formIndex >= list.length - 1}
           onClick={() => goForm(1)}>←</Btn>
       </div>
       {/* טופס שהקריאה שלו נכשלה: הסיבה, וכפתור "קרא שוב" שקודם שואל */}
@@ -91,8 +93,8 @@ export function FormView() {
           <Btn className="secondary" id="fvNew" onClick={() => startNewIntake()}>⬆ קליטה חדשה</Btn>
           <Btn className="secondary" id="fvExport" disabled={!chips.exportReady} title={chips.exportWhy || 'הורדת כל הטפסים לקובץ Excel'}
             onClick={(e) => openExportPreview(e.currentTarget)}>⬇ ייצוא לאקסל</Btn>
-          <Btn className="primary" id="fvApprove" disabled={!r || !!r.review_count || r.verified}
-            title={r && r.review_count ? 'נשארו ' + r.review_count + ' שדות לבדיקה' : ''}
+          <Btn className="primary" id="fvApprove" disabled={!r || !!r.review_count || r.verified || S.processing}
+            title={S.processing && r && !r.verified ? 'הקריאה עוד נמשכת — אפשר לעיין ולתקן, ואת הטופס מאשרים בסיום' : r && r.review_count ? 'נשארו ' + r.review_count + ' שדות לבדיקה' : ''}
             onClick={() => { const c = currentRecord(); if (c) verify(c.record_id); }}>
             {r && r.verified ? '✓ הטופס אושר' : '✓ אישור הטופס'}
           </Btn>
@@ -104,7 +106,7 @@ export function FormView() {
 
 /* שני טפסים בעמוד אחד: המזכירה מחליטה לפצל — בחינם, בלי קריאה נוספת. בחלק שפוצל — "בטל פיצול". */
 function SplitButton({ r }: { r: Rec | null }) {
-  if (!r) return <Btn className="secondary splitbtn hidden" id="fvSplit"></Btn>;
+  if (!r || S.processing) return <Btn className="secondary splitbtn hidden" id="fvSplit"></Btn>;
   const undo = r.split_from_page && !r.verified;
   const can = !r.split_from_page && !r.verified && !r.error && !r.joined;
   return (
@@ -133,7 +135,7 @@ function FailBar({ r }: { r: Rec | null }) {
 /* טופס חתוך שהגיע בשני קבצים. הכול בלי קריאה ובחינם. */
 function JoinBar({ r }: { r: Rec | null }) {
   const empty = <div className="failbar joinbar hidden" id="fvJoined" role="status" aria-live="polite"></div>;
-  if (!r) return empty;
+  if (!r || S.processing) return empty;
   const canPick = r.can_join && joinCandidates(r).length > 0;
   const act = (a: string) => joinAction('/api/records/' + r.record_id + '/' + a, null,
     a === 'split' ? '✓ הטופס הופרד לשני טפסים — אפשר לחבר בחזרה' : '✓ הטופס חובר בחזרה');
@@ -261,7 +263,7 @@ function ZoomPanel({ r }: { r: Rec }) {
       <div className="zhead"><h3>{isName(spec.key) ? 'שם פרטי ושם משפחה' : spec.label}</h3>
         {f.state === 'needs_review' ? <span className="badge review">לבדיקה</span> : f.state === 'approved' ? <span className="badge ok">✓ אושר</span> : null}
         <span className="grow"></span>
-        {canAskHelp(r, f) ? <Btn className="secondary helpbtn" data-help="ask" title="מתלבטת? לשאול ממונה — בהודעה אין פרטי מטופל">🙋 עזרה</Btn> : null}
+        {!S.processing && canAskHelp(r, f) ? <Btn className="secondary helpbtn" data-help="ask" title="מתלבטת? לשאול ממונה — בהודעה אין פרטי מטופל">🙋 עזרה</Btn> : null}
         <Btn className="closebtn" data-zoomclose="1" aria-label="סגירת התקריב" title="סגירה (Esc)" onClick={closeZoom}>✕</Btn></div>
       {why ? <p className="zwhy">{why}</p> : null}
       <HelpStrip f={f} fieldKey={spec.key} />

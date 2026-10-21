@@ -6,7 +6,7 @@ import { S, fieldLabel, pageUrl } from '../store';
 import {
   approveField, cancelPopTimer, chips, closePop, downloadReady, finishEdit, openExportPreview, openPop, openRecord,
   schedulePop, scheduleClose, setFilter, setSenderFilter, setView, startEdit, startNewIntake, typeQuery, verify,
-  visibleRecords,
+  visibleRecords, waitingForJoin,
 } from '../actions';
 import { Btn, StatusBadge, ValueView, storedText } from './Bits';
 import { FormView } from './FormView';
@@ -14,7 +14,8 @@ import { FormView } from './FormView';
 export function Results() {
   const formMode = S.view === 'form';
   return (
-    <section id="results" className={'strip' + (S.resultsVisible && S.page !== 'records' ? '' : ' hidden') + (formMode ? ' formmode' : '')}
+    <section id="results" className={'strip' + (S.resultsVisible && S.page !== 'records' ? '' : ' hidden') + (formMode ? ' formmode' : '')
+      + (S.processing ? ' early' : '')}
       aria-labelledby="resultsTitle">
       <h2 className="sr-only" id="resultsTitle">טפסים שנקלטו</h2>
 
@@ -77,6 +78,15 @@ export function Results() {
       <div id="tilesView" className={S.view === 'tiles' ? undefined : 'hidden'}>
         <ul className="ftiles" id="tileGrid" aria-label="הטפסים">
           {S.view === 'tiles' ? visibleRecords().map((r) => <TileCard key={r.record_id} r={r} />) : null}
+          {S.view === 'tiles' && S.processing && S.last ? S.last.records.filter(waitingForJoin).map((r) => (
+            <li key={r.record_id} className="ftile" aria-disabled="true" style={{ cursor: 'default', opacity: 0.7 }}
+              aria-label={'עמוד ' + r.page_number + ' — ממתין לחיבור, ייפתח בסוף הקריאה'}>
+              <div className="thumb"><HideBroken src={pageUrl(r) + '/thumb'} /><span className="badge ready">⏳ ממתין לחיבור</span></div>
+              <div className="body"><h4>ייתכן שזה חלק תחתון של טופס</h4>
+                <span className="who">ייפתח בסוף הקריאה, אחרי חיבור החצאים</span>
+                <span className="metaline"><span>עמוד {r.page_number}</span><span className="file" title={r.source_name}>{r.source_name}</span></span></div>
+            </li>
+          )) : null}
         </ul>
         <div className={'empty-filter' + (S.view === 'tiles' && visibleRecords().length === 0 ? '' : ' hidden')} id="tilesEmpty">אין טפסים שמתאימים לסינון הזה.</div>
       </div>
@@ -135,8 +145,8 @@ function TableBody() {
             {S.fields.map((f) => <Cell key={f.key} r={r} spec={f} />)}
             <td className="acts">{r.verified
               ? <span className="verified" title="הטופס אושר">✓</span>
-              : <Btn className="approveRow" data-rec={r.record_id} disabled={!!open} aria-label="אישור הטופס"
-                  title={open ? 'נשארו ' + open + ' שדות לבדיקה' : 'אישור כל הטופס'}
+              : <Btn className="approveRow" data-rec={r.record_id} disabled={!!open || S.processing} aria-label="אישור הטופס"
+                  title={S.processing ? 'הקריאה עוד נמשכת — אפשר לעיין ולתקן, ואת הטופס מאשרים בסיום' : open ? 'נשארו ' + open + ' שדות לבדיקה' : 'אישור כל הטופס'}
                   onClick={(e) => { e.stopPropagation(); verify(r.record_id); }}>✓</Btn>}</td>
           </tr>,
           notes.length ? <tr key={r.record_id + '-n'} className="noterow"><td colSpan={span}>{notes.join(' · ')}</td></tr> : null,

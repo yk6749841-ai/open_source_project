@@ -13,7 +13,7 @@ export type Field = {
 export type Rec = {
   record_id: string; source_index: number; source_name: string; page_number: number; error: string; note: string;
   review_count: number; template: string; low_resolution: boolean; verified: boolean; straightened: string;
-  joined: boolean; split_from_joined: boolean; can_join: boolean; version: number; from_store: string;
+  joined: boolean; joined_from?: string[]; split_from_joined: boolean; can_join: boolean; version: number; from_store: string;
   split_from_page: boolean; full_name_crop: boolean; fields: Record<string, Field>;
 };
 export type Page = { source_index: number; page_number: number; status: string; record_id: string | null };

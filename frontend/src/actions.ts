@@ -252,8 +252,16 @@ async function tick() {
   S.pCount = '';
   S.pFiles = (d.sources || []).map((s) => ({ name: s.filename, error: s.error }));
   countTo(progressOf(d));
-  emit();
-  if (!finished) return;
+  if (!finished) {
+    // טפסים שכבר נקראו מופיעים כבר עכשיו, מתחת לטבעת — אפשר לעיין ולתקן. אישור הטופס רק בסוף,
+    // כי חיבור החצאים וזיהוי טפסים מהמערכת רצים אחרי שכל העמודים נקראו (החלטת נועה, 21/10/2026).
+    if (d.records.length) {
+      S.pCount = 'אפשר כבר לעיין בטפסים שמוכנים ולתקן אותם — למטה';
+      render(d);
+    }
+    emit();
+    return;
+  }
 
   // הכול נקרא: האחוז מגיע ל-100, ✓, ואז עוברים לאריחים
   clearInterval(timer);
@@ -271,6 +279,10 @@ function finish(me: string, d: Batch, n: number, total: number) {
   emit();
   setTimeout(() => {
     if (me !== S.batch) return;
+    // מי שבאמצע טופס: כרטיס ההתקדמות שמעליו נעלם — מתקנים את הגלילה כך שהטופס נשאר באותו מקום במסך
+    const form = S.view === 'form' ? $('#formView') : null;
+    const formTop = form ? form.getBoundingClientRect().top : null;
+    if (form && formTop != null) afterRender(() => window.scrollBy(0, form.getBoundingClientRect().top - formTop));
     S.finishing = false;
     S.processing = false;
     S.progressVisible = false;
@@ -282,7 +294,7 @@ function finish(me: string, d: Batch, n: number, total: number) {
     lastSignature = '';
     render(d, true);
     remember();
-    afterRender(() => $('#results')?.scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' }));
+    if (S.view !== 'form') afterRender(() => $('#results')?.scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' }));
     emit();
   }, calm ? 250 : 1300);
 }
@@ -326,8 +338,13 @@ function revealTile(id: string) {
 /* ------------------------------------------------------------ תצוגה כללית */
 export function visibleRecords(): Rec[] {
   if (!S.last) return [];
-  return S.last.records.filter((r) => {
+  // בזמן הקריאה הטפסים מגיעים לפי מי שסיים ראשון — במסך הם לפי סדר העמודים, כך ש"הבא" הולך לפי הסדר
+  const records = S.processing
+    ? S.last.records.slice().sort((a, b) => a.source_index - b.source_index || a.page_number - b.page_number)
+    : S.last.records;
+  return records.filter((r) => {
     if (S.view === 'form' && r.record_id === S.pinnedId) return true;
+    if (S.processing && waitingForJoin(r)) return false;
     if (S.filter === 'review' && !(r.review_count > 0)) return false;
     if (S.filter === 'approved' && !isApproved(r)) return false;
     if (S.senderFilter && senderOf(r) !== S.senderFilter) return false;
@@ -338,6 +355,9 @@ export function visibleRecords(): Rec[] {
     return true;
   });
 }
+
+// בזמן הקריאה: עמוד בלי שם, ת"ז או מרכזי — אולי חצי תחתון של טופס. מוצג כ"ממתין לחיבור" עד הסוף.
+export function waitingForJoin(r: Rec) { return S.processing && !r.error && !hasPatient(r); }
 
 let lastSignature = '';
 function signature(d: Batch) {
@@ -474,6 +494,12 @@ export function openPop(kind: 'cell' | 'page', rec: string, key: string) {
 export function currentRecord(): Rec | null {
   const list = visibleRecords();
   if (!list.length) return null;
+  // הטופס הפתוח נשאר אותו טופס גם כשטפסים חדשים מצטרפים, הסדר מתעדכן בסוף, או החצי שלו חובר
+  if (S.view === 'form' && S.pinnedId) {
+    let at = list.findIndex((r) => r.record_id === S.pinnedId);
+    if (at < 0) at = list.findIndex((r) => (r.joined_from || []).includes(S.pinnedId!));
+    if (at >= 0) S.formIndex = at;
+  }
   S.formIndex = Math.max(0, Math.min(S.formIndex, list.length - 1));
   if (S.view === 'form') S.pinnedId = list[S.formIndex].record_id;
   return list[S.formIndex];

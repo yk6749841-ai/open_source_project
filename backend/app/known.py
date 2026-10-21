@@ -60,7 +60,8 @@ def apply_known(records: list[FormRecord]) -> int:
     their saved values. Returns how many."""
     found = 0
     for record in records:
-        if record.error or record.from_store or record.verified:
+        # version > 0: המזכירה כבר תיקנה את הטופס בזמן שהשאר נקראו — לא דורסים את התיקון
+        if record.error or record.from_store or record.verified or record.version > 0:
             continue
         try:
             saved = db.same_form(record.fields["commitment_numbers"].values, record.fields["national_id"].values)
